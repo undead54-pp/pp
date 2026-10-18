@@ -1827,17 +1827,54 @@ def get_ui_type_lists():
     return text_type_map, room_tag_map, line_style_map
 
 
+def bh_ui_family_names(document):
+    """All loaded families, including families with no placed instances."""
+    names = set()
+    for family in FilteredElementCollector(document).OfClass(Family).ToElements():
+        name = get_element_name(family)
+        if name:
+            names.add(name)
+    return sorted(names, key=lambda value: value.lower())
+
+
+def bh_ui_worksets(document):
+    """List all user/model worksets; internal view worksets are Revit-managed."""
+    if not document.IsWorkshared:
+        return [], None
+    worksets = list(FilteredWorksetCollector(document)
+                    .OfKind(WorksetKind.UserWorkset).ToWorksets())
+    worksets.sort(key=lambda workset: str(workset.Name).lower())
+    active_id = document.GetWorksetTable().GetActiveWorksetId().IntegerValue
+    return [(str(workset.Name), workset.Id.IntegerValue) for workset in worksets], active_id
+
+
+def bh_choose_openings(candidates, filter_text, document, exact_family=None, workset_id=None,
+                       trust_selection=False):
+    """Apply explicit UI selections before annotation deletion or creation."""
+    scoped = [candidate for candidate in candidates
+              if workset_id is None or candidate.WorksetId.IntegerValue == workset_id]
+    if exact_family:
+        return [candidate for candidate in scoped
+                if bh_norm(bh_get_family_type(candidate, document)[0]) == bh_norm(exact_family)]
+    matched = [candidate for candidate in scoped if bh_matches(candidate, filter_text, document)]
+    # Preserve the original explicit-selection fallback only for manually typed filters.
+    return scoped if trust_selection and not matched else matched
+
+
 def show_smart_ui():
-    """Reference-style presentation only; the annotation/settings contract is unchanged."""
+    """WD interface with live family/workset lists and the original annotation engine."""
     from System.Drawing import (Color, RectangleF, PointF, SolidBrush, Pen,
                                 GraphicsUnit, StringFormat, StringAlignment)
-    from System.Drawing.Drawing2D import (GraphicsPath, SmoothingMode, DashStyle,
-                                         LinearGradientBrush, LinearGradientMode)
+    from System.Drawing.Drawing2D import GraphicsPath, SmoothingMode, DashStyle
+    from System.Drawing.Text import TextRenderingHint
     from System.Windows.Forms import (Screen, AutoScaleMode, Cursors, ToolTip,
                                       PaintEventHandler, DrawMode, DrawItemEventHandler,
-                                      DrawItemState)
+                                      DrawItemState, ControlStyles, RichTextBox,
+                                      RichTextBoxScrollBars, BorderStyle)
 
     text_type_map, room_tag_map, line_style_map = get_ui_type_lists()
+    family_names = bh_ui_family_names(doc)
+    worksets, active_workset_id = bh_ui_worksets(doc)
     C_RED = Color.FromArgb(255, 21, 42)
     C_RED_DARK = Color.FromArgb(212, 0, 23)
     C_BLUSH = Color.FromArgb(255, 237, 240)
@@ -1883,7 +1920,9 @@ def show_smart_ui():
             self.hot = False
             self.FlatStyle = System.Windows.Forms.FlatStyle.Flat
             self.FlatAppearance.BorderSize = 0
-            self.BackColor = C_SURFACE
+            self.BackColor = C_WHITE if kind == 'run' else C_SURFACE
+            self.SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint |
+                          ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, True)
             self.Cursor = Cursors.Hand
             self.UseVisualStyleBackColor = False
             self.AccessibleName = title
@@ -1901,12 +1940,19 @@ def show_smart_ui():
             self.Invalidate()
             Button.OnMouseLeave(self, event)
 
+        def OnPaintBackground(self, event):
+            # Explicitly clear the complete buffer: native Button backgrounds can
+            # leave black corner pixels outside a custom rounded path in Dynamo.
+            event.Graphics.Clear(self.BackColor)
+
         def OnPaint(self, event):
             g = event.Graphics
+            g.Clear(self.BackColor)
             state = g.Save()
             resources = []
             try:
                 g.SmoothingMode = SmoothingMode.AntiAlias
+                g.TextRenderingHint = TextRenderingHint.ClearTypeGridFit
                 g.ScaleTransform(float(scale), float(scale))
                 w, h = self.ClientSize.Width / scale, self.ClientSize.Height / scale
                 draw = Painter(g, resources)
@@ -2029,6 +2075,13 @@ def show_smart_ui():
                 self.line(10, 4, 5, 13, red, 2.5)
                 self.line(-5, 13, 5, 13, red, 2.5)
                 self.arc(-5, 11, 10, 10, 0, 180, red, 2.5)
+            elif kind == 'support':
+                # Headset + microphone distinguishes support from the BIM team.
+                self.arc(-15, -16, 30, 30, 180, 180, red, 2.8)
+                self.round(-17, -3, 7, 17, 3, C_WHITE, red)
+                self.round(10, -3, 7, 17, 3, C_WHITE, red)
+                self.arc(-1, 2, 16, 19, 0, 90, red, 2.3)
+                self.round(-4, 17, 10, 5, 2, red)
             elif kind == 'people':
                 for x, y, r in [(0, -8, 6), (-11, -5, 4), (11, -5, 4)]:
                     self.ellipse(x-r, y-r, r*2, r*2, C_RED)
@@ -2141,6 +2194,66 @@ def show_smart_ui():
             g.Restore(label_state)
         g.Restore(state)
 
+    def paint_architecture(draw):
+        """A red/white axonometric pavilion, with roof planes, glazing and columns."""
+        g = draw.g
+        state = g.Save()
+        try:
+            g.SetClip(RectangleF(978, 0, 622, 132))
+            red = Color.FromArgb(178, 242, 23, 47)
+            soft = Color.FromArgb(65, 242, 23, 47)
+            pale = Color.FromArgb(255, 245, 247)
+            def project(x, y, z=0):
+                return (1050+x*0.94+y*0.56, 100+x*0.09-y*0.26-z)
+            def edge(a, b, color=red, weight=0.9):
+                draw.line(a[0], a[1], b[0], b[1], color, weight)
+            def plane(points, fill, border=red):
+                draw.polygon(points, fill)
+                for i, point in enumerate(points):
+                    edge(point, points[(i+1) % len(points)], border)
+            # A quiet ground grid, rather than overlapping diagonal construction lines.
+            for x in range(-50, 451, 50):
+                edge(project(x, -30), project(x, 210), soft, 0.5)
+            for y in range(-30, 211, 40):
+                edge(project(-50, y), project(450, y), soft, 0.5)
+            # Pavilion mass: glazed front elevation and softly shaded side wall.
+            plane([project(0,0),project(370,0),project(370,0,57),project(0,0,57)], C_WHITE)
+            plane([project(370,0),project(370,160),project(370,160,57),project(370,0,57)], pale)
+            for x in range(0, 371, 31):
+                edge(project(x,0), project(x,0,57), red, 0.9)
+            for z in (19, 38):
+                edge(project(0,0,z), project(370,0,z), soft, 0.75)
+                edge(project(370,0,z), project(370,160,z), soft, 0.75)
+            for y in range(0,161,32):
+                edge(project(370,y), project(370,y,57), soft, 0.7)
+            # Floating roof slab and a red entrance canopy.
+            roof=[project(-14,-12,63),project(386,-12,63),
+                  project(386,174,63),project(-14,174,63)]
+            plane(roof, C_WHITE)
+            for x in (0, 80, 160, 240, 320, 370):
+                edge(project(x,-12,63), project(x,174,63), soft, 0.65)
+            plane([project(-14,-12,59),project(386,-12,59),
+                   project(386,-12,63),project(-14,-12,63)], pale)
+            plane([project(94,-34,28),project(208,-34,28),
+                   project(208,0,28),project(94,0,28)], Color.FromArgb(255, 232, 237))
+            for x in (98,204):
+                edge(project(x,-30),project(x,-30,28),red,1.3)
+            # Roof opening and a raised, translucent stair volume add architectural depth.
+            plane([project(230,60,64),project(310,60,64),
+                   project(310,122,64),project(230,122,64)], pale, soft)
+            for x in (230,250,270,290,310):
+                edge(project(x,60,64),project(x,122,64),soft,0.6)
+            for step in range(5):
+                edge(project(80,-44-step*8,-step*1.5),
+                     project(223,-44-step*8,-step*1.5),soft,0.8)
+            # A restrained section marker at the edge of the drawing.
+            a,b=project(405,-5),project(405,175)
+            edge(a,b,red,0.65)
+            for point in (a,b):
+                draw.ellipse(point[0]-2,point[1]-2,4,4,C_WHITE,red)
+        finally:
+            g.Restore(state)
+
     row_info = [('door', 'Opening Family'), ('format', 'Label Format'),
                 ('text', 'Text Style'), ('line', 'Line Style'),
                 ('rotation', 'Text Rotation'), ('layers', 'Workset Selection')]
@@ -2151,28 +2264,21 @@ def show_smart_ui():
         resources = []
         try:
             g.SmoothingMode = SmoothingMode.AntiAlias
+            g.TextRenderingHint = TextRenderingHint.ClearTypeGridFit
             g.Clear(C_SURFACE)
             g.ScaleTransform(float(scale), float(scale))
             draw = Painter(g, resources)
-            # Soft architectural wireframe in the header, behind the brand/title.
-            wire = Color.FromArgb(48, 255, 21, 42)
-            for i in range(9):
-                x = 1030 + i * 48
-                draw.line(x, 0, x, 130, wire, 0.7)
-                draw.line(x+7, 0, x+7, 130, wire, 0.7)
-                draw.line(x-95, 120, x+150, 0, wire, 0.7)
-                draw.line(x-88, 120, x+157, 0, wire, 0.7)
-                draw.line(900, 50+i*7, 1595, i*17, wire, 0.6)
+            paint_architecture(draw)
             g.DrawImage(logo_image, RectangleF(38, 28, 326, 85))
             draw.line(382, 30, 382, 104, Color.FromArgb(201, 211, 225))
             draw.text('Opening Tagger', 424, 28, 500, 52, 38, C_INK, True)
-            draw.text('B U L K H E A D   W A L L   O P E N I N G', 427, 83, 570, 30, 16, C_MUTED, True)
+            draw.text('BULKHEAD WALL OPENING', 427, 83, 510, 30, 16, C_MUTED, True)
             # White rounded cards with a faint shadow and thin cool border.
             for x, w in ((28, 620), (662, 912)):
                 draw.round(x, 137, w, 526, 14, Color.FromArgb(241, 245, 250))
                 draw.round(x, 134, w, 526, 14, C_WHITE, Color.FromArgb(231, 237, 244))
-            draw.text('O P E N I N G  T A G G E R', 52, 151, 560, 37, 25, C_INK, True)
-            draw.text('B U L K H E A D   W A L L   O P E N I N G', 53, 186, 570, 28, 16, C_MUTED)
+            draw.text('OPENING TAGGER', 52, 151, 560, 37, 27, C_INK, True)
+            draw.text('BULKHEAD WALL OPENING', 53, 186, 570, 28, 16, C_MUTED, True)
             draw.text('Create overhead bulkhead outlines and height notes for wall openings.',
                       53, 219, 560, 35, 16, C_MUTED)
             for index, (icon, label) in enumerate(row_info):
@@ -2191,7 +2297,7 @@ def show_smart_ui():
             draw.text('Developed by', 109, 799, 210, 23, 14, C_MUTED)
             draw.text('Pranay Parkar', 109, 821, 210, 25, 17, C_INK, True)
             draw.line(335, 804, 335, 840, Color.FromArgb(210, 220, 234))
-            draw.icon('people', 435, 820)
+            draw.icon('support', 435, 818)
             draw.text('Support', 477, 799, 400, 23, 14, C_MUTED)
             draw.text('Akshay Rawat  |  Harshada Hikare', 477, 821, 410, 25, 17, C_INK, True)
             draw.line(905, 804, 905, 840, Color.FromArgb(210, 220, 234))
@@ -2226,6 +2332,7 @@ def show_smart_ui():
                 if event.Index < 0:
                     return
                 event.DrawBackground()
+                event.Graphics.TextRenderingHint = TextRenderingHint.ClearTypeGridFit
                 selected = (event.State & DrawItemState.Selected) == DrawItemState.Selected
                 brush = SolidBrush(C_WHITE if selected else C_INK)
                 try:
@@ -2241,9 +2348,14 @@ def show_smart_ui():
 
     family_combo = ComboBox()
     family_combo.DropDownStyle = ComboBoxStyle.DropDown
-    family_combo.Items.Add('DOOR - Opening Wall')
+    for name in family_names:
+        family_combo.Items.Add(name)
     family_combo.Text = opening_filter or 'DOOR - Opening Wall'
     place_field(family_combo, 0, 'opening_filter')
+    family_combo.AutoCompleteMode = System.Windows.Forms.AutoCompleteMode.SuggestAppend
+    family_combo.AutoCompleteSource = System.Windows.Forms.AutoCompleteSource.ListItems
+    family_combo.DropDownWidth = px(520)
+    tips.SetToolTip(family_combo, 'All loaded Revit families. Choose an exact family or type your existing name filter.')
 
     # Editable dropdown preserves arbitrary existing templates while matching the reference.
     opening_text_box = ComboBox()
@@ -2308,147 +2420,156 @@ def show_smart_ui():
     place_field(orientation_combo, 4, 'opening_orientation')
     workset_combo = ComboBox()
     workset_combo.DropDownStyle = ComboBoxStyle.DropDownList
-    workset_combo.Items.Add('Use Active Workset')
+    # All Worksets preserves the original document/selection-wide scan by default.
+    workset_labels = ['All Worksets']
+    workset_ids = [None]
+    if active_workset_id is not None:
+        active_name = next((name for name, wid in worksets if wid == active_workset_id), '')
+        workset_labels.append('Use Active Workset' + (' - ' + active_name if active_name else ''))
+        workset_ids.append(active_workset_id)
+    for name, workset_id in worksets:
+        workset_labels.append(name)
+        workset_ids.append(workset_id)
+    for label in workset_labels:
+        workset_combo.Items.Add(label)
     workset_combo.SelectedIndex = 0
-    place_field(workset_combo, 5, 'workset_display')
-    tips.SetToolTip(workset_combo, 'Uses the existing Revit annotation/workset behavior. No workset is reassigned.')
+    place_field(workset_combo, 5, 'opening_workset')
+    workset_combo.DropDownWidth = px(520)
+    tips.SetToolTip(workset_combo,
+        'All user worksets in this model. A selection filters source openings; annotations remain in the active view.'
+        if doc.IsWorkshared else 'This document is not workshared. All Worksets processes the original scan scope.')
 
     run_button = DesignButton('run', 'Run', 'Create the opening outlines and height notes.', 'play')
     bounds(run_button, 46, 598, 584, 49)
     run_button.TabIndex = 6
     surface.Controls.Add(run_button)
 
-    def show_help_click(sender, event):
+    def show_how_it_works(sender, event):
         help_form = Form()
-        help_form.Text = "WD | Opening Tagger Help"
+        help_form.Text = 'WD | Opening Tagger - How It Works'
         help_form.StartPosition = FormStartPosition.CenterParent
         help_form.FormBorderStyle = FormBorderStyle.FixedDialog
         help_form.MaximizeBox = False
         help_form.MinimizeBox = False
-        help_form.ClientSize = Size(620, 500)
+        help_form.AutoScaleMode = getattr(AutoScaleMode, 'None')
+        help_form.ClientSize = Size(px(740), px(680))
         help_form.BackColor = C_WHITE
-        help_form.Font = Font("Segoe UI", 9.5)
-        help_form.ForeColor = C_INK
+        help_form.Font = ui_font
+        guide_fonts = [Font('Segoe UI', float(size*scale), style, GraphicsUnit.Pixel)
+                       for size, style in ((26,FontStyle.Bold),(18,FontStyle.Bold),
+                                           (16,FontStyle.Regular),(16,FontStyle.Bold))]
+        title = Label()
+        title.Text = 'How It Works'
+        title.Font = guide_fonts[0]
+        title.ForeColor = C_INK
+        bounds(title, 28, 22, 680, 39)
+        help_form.Controls.Add(title)
+        subtitle = Label()
+        subtitle.Text = 'Opening Tagger | Purpose, settings and step-by-step instructions'
+        subtitle.ForeColor = C_MUTED
+        bounds(subtitle, 29, 67, 680, 30)
+        help_form.Controls.Add(subtitle)
 
-        # Main heading
-        htitle = Label()
-        htitle.Text = "Opening Tagger — Quick Guide"
-        htitle.Font = Font("Segoe UI", 15.0, FontStyle.Bold)
-        htitle.ForeColor = C_INK
-        htitle.AutoSize = False
-        htitle.UseCompatibleTextRendering = True
-        htitle.TextAlign = System.Drawing.ContentAlignment.MiddleLeft
-        htitle.Location = Point(24, 16)
-        htitle.Size = Size(570, 36)
-        help_form.Controls.Add(htitle)
+        # RichTextBox supplies native mouse-wheel, keyboard and scrollbar navigation;
+        # its formatted paragraphs wrap instead of clipping at fixed Label heights.
+        guide = RichTextBox()
+        bounds(guide, 28, 112, 684, 487)
+        guide.ReadOnly = True
+        guide.WordWrap = True
+        guide.ScrollBars = RichTextBoxScrollBars.Vertical
+        guide.BorderStyle = getattr(BorderStyle, 'None')
+        guide.BackColor = C_WHITE
+        guide.ForeColor = C_MUTED
+        guide.Font = guide_fonts[2]
+        guide.DetectUrls = False
+        guide.TabStop = True
+        guide.AccessibleName = 'How It Works guide; scroll to read all sections'
+        help_form.Controls.Add(guide)
 
-        # PURPOSE — plain-language description of the result.
-        purpose_title = Label()
-        purpose_title.Text = "PURPOSE"
-        purpose_title.Font = Font("Segoe UI", 10.0, FontStyle.Bold)
-        purpose_title.ForeColor = C_RED
-        purpose_title.Location = Point(26, 66)
-        purpose_title.Size = Size(560, 22)
-        help_form.Controls.Add(purpose_title)
+        def paragraph(text, font, color):
+            guide.SelectionStart = guide.TextLength
+            guide.SelectionLength = 0
+            guide.SelectionFont = font
+            guide.SelectionColor = color
+            guide.AppendText(text + '\n\n')
 
-        purpose_body = Label()
-        purpose_body.Text = ("Creates outline lines around matching wall openings and adds a label "
-                             "showing the height above finished floor (A.F.F.).")
-        purpose_body.Font = Font("Segoe UI", 9.5, FontStyle.Regular)
-        purpose_body.ForeColor = C_MUTED
-        purpose_body.AutoSize = False
-        purpose_body.UseCompatibleTextRendering = True
-        purpose_body.Location = Point(26, 90)
-        purpose_body.Size = Size(566, 42)
-        help_form.Controls.Add(purpose_body)
-
-        # SETTINGS — explain each visible field in familiar terms.
-        settings_title = Label()
-        settings_title.Text = "SETTINGS"
-        settings_title.Font = Font("Segoe UI", 10.0, FontStyle.Bold)
-        settings_title.ForeColor = C_RED
-        settings_title.Location = Point(26, 142)
-        settings_title.Size = Size(560, 22)
-        help_form.Controls.Add(settings_title)
-
-        settings_body = Label()
-        settings_body.Text = (
-            "Opening Family: choose which openings to mark.\n"
-            "Label Format: choose the note wording; {height} inserts the detected height.\n"
-            "Text Style: choose how the label looks.\n"
-            "Line Style: choose how the outline lines look.\n"
-            "Text Rotation: Auto turns the label to follow the opening.")
-        settings_body.Font = Font("Segoe UI", 9.5, FontStyle.Regular)
-        settings_body.ForeColor = C_MUTED
-        settings_body.AutoSize = False
-        settings_body.UseCompatibleTextRendering = True
-        settings_body.Location = Point(26, 168)
-        settings_body.Size = Size(566, 112)
-        help_form.Controls.Add(settings_body)
-
-        # INSTRUCTIONS — short sequence matching the actual workflow.
-        instructions_title = Label()
-        instructions_title.Text = "INSTRUCTIONS"
-        instructions_title.Font = Font("Segoe UI", 10.0, FontStyle.Bold)
-        instructions_title.ForeColor = C_RED
-        instructions_title.Location = Point(26, 290)
-        instructions_title.Size = Size(560, 22)
-        help_form.Controls.Add(instructions_title)
-
-        instructions_body = Label()
-        instructions_body.Text = (
-            "1. Open the plan view where the outlines should appear.\n"
-            "2. Confirm the Opening Family and review the label and line settings.\n"
-            "3. Click Run. The tool updates its own previous annotations automatically.\n"
-            "4. Check the new outlines and height labels in the same plan view.")
-        instructions_body.Font = Font("Segoe UI", 9.5, FontStyle.Regular)
-        instructions_body.ForeColor = C_MUTED
-        instructions_body.AutoSize = False
-        instructions_body.UseCompatibleTextRendering = True
-        instructions_body.Location = Point(26, 316)
-        instructions_body.Size = Size(566, 100)
-        help_form.Controls.Add(instructions_body)
-
-        close_button = Button()
-        close_button.Text = "Close"
-        close_button.Font = Font("Segoe UI", 9.5, FontStyle.Bold)
-        close_button.BackColor = C_RED
-        close_button.ForeColor = C_WHITE
-        close_button.FlatStyle = System.Windows.Forms.FlatStyle.Flat
-        close_button.FlatAppearance.BorderSize = 0
-        close_button.Location = Point(492, 448)
-        close_button.Size = Size(100, 32)
-        close_button.DialogResult = DialogResult.OK
-        help_form.Controls.Add(close_button)
-        help_form.AcceptButton = close_button
-        help_form.ShowDialog(form)
-        help_form.Dispose()
-    def show_user_guide(sender, event):
-        show_help_click(sender, event)
+        paragraph('01  PURPOSE', guide_fonts[1], C_RED_DARK)
+        paragraph('Create overhead outline lines around matching wall openings and add '
+                  'a height label above finished floor (A.F.F.) in the active plan view.',
+                  guide_fonts[2], C_INK)
+        paragraph('02  SETTINGS', guide_fonts[1], C_RED_DARK)
+        entries = [
+            ('Opening Family', 'Choose from all families loaded in this model. A chosen '
+             'family is matched exactly. You can also type the same family/type filter used by the original script.'),
+            ('Label Format', 'Edit the note wording. {height} inserts the detected opening height. '
+             'Example: BULKHEAD @ {height} A.F.F.'),
+            ('Text Style', 'Select a Text Note Type from this document, or choose <Skip text note>.'),
+            ('Line Style', 'Select the overhead outline style, or choose <No line style>.'),
+            ('Text Rotation', 'Auto follows the opening. Horizontal and Vertical use the corresponding fixed angle.'),
+            ('Workset Selection', 'All Worksets keeps the original scan scope. Use Active Workset or '
+             'choose any listed user workset to limit source openings to that workset. '
+             'The tool does not reassign model or annotation worksets.')]
+        for heading, body in entries:
+            paragraph(heading, guide_fonts[3], C_INK)
+            paragraph(body, guide_fonts[2], C_MUTED)
+        paragraph('03  STEP-BY-STEP', guide_fonts[1], C_RED_DARK)
+        for heading, body in [
+            ('1. Open your plan', 'Use a Floor Plan, Reflected Ceiling Plan or Engineering Plan where the annotations should appear.'),
+            ('2. Review your settings', 'Choose the family, label format, text style, line style, rotation and workset scope.'),
+            ('3. Run the tool', 'Click Run. Existing selection behavior is preserved for typed filters; '
+             'choosing a listed family targets that exact family. Review warnings in the Dynamo output.'),
+            ('4. Check the result', 'Review the outlines and height notes in the same plan view.')]:
+            paragraph(heading, guide_fonts[3], C_INK)
+            paragraph(body, guide_fonts[2], C_MUTED)
+        paragraph('04  RERUNS & PREVIEW', guide_fonts[1], C_RED_DARK)
+        paragraph('Rerunning replaces this tool\'s tracked annotations for the matched openings. '
+                  'Unrelated detail lines and notes are preserved. The plan preview is illustrative; '
+                  'the annotation engine retains its existing tracing, height and placement rules.',
+                  guide_fonts[2], C_MUTED)
+        paragraph('05  RESOURCES', guide_fonts[1], C_RED_DARK)
+        paragraph('Training Video and User Guide are work in progress. '
+                  'This How It Works panel contains the available instructions.', guide_fonts[2], C_MUTED)
+        guide.SelectionStart = 0
+        guide.SelectionLength = 0
+        guide.ScrollToCaret()
+        hint = Label()
+        hint.Text = 'Scroll inside the guide to read all sections.'
+        hint.ForeColor = C_MUTED
+        bounds(hint, 29, 626, 500, 25)
+        help_form.Controls.Add(hint)
+        close = Button()
+        close.Text = 'Close'
+        close.Font = ui_font
+        close.BackColor = C_RED
+        close.ForeColor = C_WHITE
+        close.UseVisualStyleBackColor = False
+        close.FlatStyle = System.Windows.Forms.FlatStyle.Flat
+        close.FlatAppearance.BorderSize = 0
+        close.DialogResult = DialogResult.OK
+        bounds(close, 593, 619, 119, 38)
+        help_form.Controls.Add(close)
+        help_form.AcceptButton = close
+        help_form.CancelButton = close
+        try:
+            help_form.ShowDialog(form)
+        finally:
+            help_form.Dispose()
+            for font in guide_fonts:
+                font.Dispose()
 
     def show_training(sender, event):
-        # No training URL was supplied: show an honest local walkthrough instead.
-        MessageBox.Show(form,
-            '1. Open a Revit plan view.\n\n'
-            '2. Choose the opening family, label wording, text style and line style.\n\n'
-            '3. Review text rotation, then click Run.\n\n'
-            '4. Inspect the outlines and height notes in the active view.\n\n'
-            'A training video link has not been configured in this script.',
-            'Opening Tagger | Training', MessageBoxButtons.OK, MessageBoxIcon.Information)
+        MessageBox.Show(form, 'Work in progress\n\nThe training video is being prepared.',
+                        'Opening Tagger | Training Video', MessageBoxButtons.OK, MessageBoxIcon.Information)
 
-    def show_purpose(sender, event):
-        MessageBox.Show(form,
-            'The tool finds matching wall-opening families, traces their projected '
-            'footprints and creates overhead outlines with height notes in the active plan.\n\n'
-            'Rerunning replaces annotations previously generated by this tool.\n\n'
-            'The plan image is an illustration. The actual script keeps its original '
-            'geometry tracing, label positioning and rotation behavior.',
-            'Opening Tagger | How It Works', MessageBoxButtons.OK, MessageBoxIcon.Information)
+    def show_user_guide(sender, event):
+        MessageBox.Show(form, 'Work in progress\n\nThe user guide is being prepared. '
+                        'For current instructions, open How It Works.',
+                        'Opening Tagger | User Guide', MessageBoxButtons.OK, MessageBoxIcon.Information)
 
     help_cards = [
-        ('Training Video', 'Watch step-by-step demonstration\nof how to use this tool.', 'play', show_training),
-        ('User Guide', 'Open the complete user guide\nwith detailed instructions.', 'guide', show_user_guide),
-        ('How It Works?', 'Learn how this tool works\nand its purpose.', 'bulb', show_purpose)]
+        ('Training Video', 'Work in progress\nTraining video coming soon.', 'play', show_training),
+        ('User Guide', 'Work in progress\nUser guide coming soon.', 'guide', show_user_guide),
+        ('How It Works?', 'Purpose, settings and instructions.\nOpen the scrollable guide.', 'bulb', show_how_it_works)]
     for index, (title, body, icon, handler) in enumerate(help_cards):
         button = DesignButton('help', title, body, icon)
         bounds(button, 28 + index * 520, 674, 504, 98)
@@ -2506,6 +2627,9 @@ def show_smart_ui():
         "room_tag_type": None,
         "finish_gap_mm": 25.0,
         "opening_filter": str(family_combo.Text or "").strip(),
+        "opening_family_name": str(family_combo.Text).strip() if str(family_combo.Text).strip() in family_names else None,
+        "opening_workset_id": workset_ids[workset_combo.SelectedIndex],
+        "opening_workset_label": str(workset_combo.SelectedItem or 'All Worksets'),
         "opening_text": str(opening_text_box.Text or ""),
         "opening_text_type_name": opening_text_label if not opening_text_label.startswith("<") else "",
         "opening_text_type": selected_object(open_text_combo, text_type_map),
@@ -2538,6 +2662,9 @@ try:
         skip_existing_tagged_rooms = smart_settings["skip_existing_tagged_rooms"]
         finish_text_type_name = smart_settings["finish_text_type_name"]
         opening_filter = smart_settings["opening_filter"]
+        opening_family_name = smart_settings.get("opening_family_name")
+        opening_workset_id = smart_settings.get("opening_workset_id")
+        report["OpeningWorkset"] = smart_settings.get("opening_workset_label", "All Worksets")
         opening_text = smart_settings["opening_text"]
         opening_text_template = opening_text or 'BULKHEAD @ {height} A.F.F.'
         opening_text_type_name = smart_settings["opening_text_type_name"]
@@ -2729,35 +2856,36 @@ else:
                         except Exception: pass
 
             if run_opening_markup and opening_filter:
-                # Prefer explicitly selected Generic Models. If none are selected,
-                # scan all Generic Model instances in the document, not just the view.
-                selected_gms = bh_get_selected_generic_models(uiapp.ActiveUIDocument, doc)
-                report["SelectedGenericModels"] = len(selected_gms)
-                if selected_gms:
-                    opening_instances = []
-                    for candidate in selected_gms:
-                        if bh_matches(candidate, opening_filter, doc):
-                            opening_instances.append(candidate)
-                    if not opening_instances:
-                        # Explicit selection is a deliberate user target; trust it if
-                        # family/type names are not exposed by the API.
-                        opening_instances = selected_gms[:]
-                        add_warning("Selected Generic Models did not expose a matching family/type name; using the explicit selection.")
-                    report["OpeningScanScope"] = "selected Generic Models"
+                # Listed families can belong to any category; a manually typed filter
+                # keeps the original Generic Model scope and explicit-selection fallback.
+                exact_family = opening_family_name
+                if exact_family:
+                    selected_candidates = []
+                    for element_id in uiapp.ActiveUIDocument.Selection.GetElementIds():
+                        candidate = doc.GetElement(element_id)
+                        if isinstance(candidate, FamilyInstance):
+                            selected_candidates.append(candidate)
+                    all_candidates = [] if selected_candidates else list(
+                        FilteredElementCollector(doc).OfClass(FamilyInstance)
+                        .WhereElementIsNotElementType().ToElements())
+                    scope_label = "Family Instances"
                 else:
-                    opening_instances = list(
-                        FilteredElementCollector(doc)
-                        .OfCategory(BuiltInCategory.OST_GenericModel)
-                        .WhereElementIsNotElementType()
-                        .ToElements()
-                    )
-                    opening_instances = [candidate for candidate in opening_instances
-                                         if bh_matches(candidate, opening_filter, doc)]
-                    report["OpeningScanScope"] = "document-wide Generic Models matching filter"
+                    selected_candidates = bh_get_selected_generic_models(uiapp.ActiveUIDocument, doc)
+                    all_candidates = [] if selected_candidates else list(
+                        FilteredElementCollector(doc).OfCategory(BuiltInCategory.OST_GenericModel)
+                        .WhereElementIsNotElementType().ToElements())
+                    scope_label = "Generic Models"
+                candidates = selected_candidates if selected_candidates else all_candidates
+                opening_instances = bh_choose_openings(candidates, opening_filter, doc,
+                    exact_family, opening_workset_id, bool(selected_candidates))
+                report["SelectedGenericModels"] = len(bh_get_selected_generic_models(uiapp.ActiveUIDocument, doc))
+                report["SelectedFamilyInstances"] = len(selected_candidates) if exact_family else 0
+                report["OpeningScanScope"] = ("selected " if selected_candidates else "document-wide ") + scope_label
+                report["OpeningInstancesScanned"] = len(candidates)
+                if selected_candidates and not exact_family:
+                    if opening_instances and not any(bh_matches(x, opening_filter, doc) for x in opening_instances):
+                        add_warning("Selected Generic Models did not expose a matching family/type name; using the explicit selection.")
 
-                report["OpeningInstancesScanned"] = len(selected_gms) if selected_gms else len(
-                    FilteredElementCollector(doc).OfCategory(BuiltInCategory.OST_GenericModel)
-                    .WhereElementIsNotElementType().ToElements())
                 report["OpeningInstancesMatched"] = len(opening_instances)
                 report["OpeningFilter"] = opening_filter
                 # Replace this tool's prior annotations for the matched opening instances.
@@ -2774,9 +2902,7 @@ else:
                 if not opening_instances:
                     examples = []
                     try:
-                        all_gms = list(FilteredElementCollector(doc)
-                            .OfCategory(BuiltInCategory.OST_GenericModel)
-                            .WhereElementIsNotElementType().ToElements())
+                        all_gms = candidates
                         for candidate in all_gms:
                             fam, typ = bh_get_family_type(candidate, doc)
                             label = "{} : {}".format(fam, typ)
@@ -2786,7 +2912,7 @@ else:
                                 break
                     except Exception:
                         pass
-                    add_warning("No opening instances matched '{}'. Generic Model family/type examples: {}".format(
+                    add_warning("No opening instances matched '{}'. Available family/type examples: {}".format(
                         opening_filter, " | ".join(examples) if examples else "<none found>"))
 
                 # Refresh annotation collectors after any room tags/notes were created.
