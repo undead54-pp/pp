@@ -1,0 +1,2913 @@
+# -*- coding: utf-8 -*-
+"""
+Revit 2024 + Dynamo IronPython 2.7
+Smart UI: Wall Opening and Bulkhead Tagging / Overhead Markup
+
+Features:
+  - Robust line style lookup for bulkhead/overhead lines.
+  - Cooler/Freezer rooms show flooring shortcut only (skipping ceiling and height).
+  - Accurate spatial room ceiling & flooring detection with height calculation.
+  - Document-wide Text Note Type and Family Instance collectors.
+  - Bulkhead footprint traced from projected family geometry with dimension/bounding-box fallback.
+  - Bulkhead outline segments and centered, angle-aligned labels created in the active plan.
+  - Standalone bulkhead-only tool; no Excel workbook input.
+  - Text is always placed inside the traced opening outline and follows the exact footprint angle.
+  - Model changes are applied directly during execution.
+"""
+
+import clr
+import os
+import re
+import math
+import zipfile
+import posixpath
+import xml.etree.ElementTree as ET
+
+clr.AddReference("RevitAPI")
+clr.AddReference("RevitServices")
+clr.AddReference("System.Windows.Forms")
+clr.AddReference("System.Drawing")
+
+from Autodesk.Revit.DB import *
+from Autodesk.Revit.DB.Architecture import RoomTag, Room
+from Autodesk.Revit.DB.ExtensibleStorage import Schema, SchemaBuilder, Entity, AccessLevel
+from RevitServices.Persistence import DocumentManager
+from RevitServices.Transactions import TransactionManager
+
+import System
+from System import EventHandler
+from System.Drawing import Size, Point, Font, FontStyle
+from System.Windows.Forms import (
+    Form, FormStartPosition, FormBorderStyle, Panel, TableLayoutPanel,
+    Label, TextBox, Button, CheckBox, ComboBox, ComboBoxStyle,
+    FlowLayoutPanel, FlowDirection, AnchorStyles, DockStyle,
+    DialogResult, MessageBox, MessageBoxButtons,
+    MessageBoxIcon, NumericUpDown, AutoSizeMode, Padding,
+    ColumnStyle, SizeType, RowStyle
+)
+
+# -----------------------------------------------------------------------------
+# DYNAMO INPUTS & HELPERS
+# -----------------------------------------------------------------------------
+def input_value(index, default=None):
+    try:
+        value = IN[index]
+        return default if value is None else value
+    except Exception:
+        return default
+
+def as_bool(value, default=False):
+    if value is None: return default
+    if isinstance(value, bool): return value
+    return str(value).strip().lower() in ("true", "1", "yes", "y", "on")
+
+def as_text(value, default=""):
+    if value is None: return default
+    return str(value).strip()
+
+def as_float(value, default=0.0):
+    try: return float(value)
+    except Exception: return default
+
+excel_path = ""  # Bulkhead-only tool: no Excel input required.
+run_room_finishes = as_bool(input_value(1, True), True)
+run_opening_markup = as_bool(input_value(2, True), True)
+room_tag_type_name = as_text(input_value(3, "ROOM TAG - SHELL : Room Tag")) or "ROOM TAG - SHELL : Room Tag"
+finish_text_type_name = as_text(input_value(4, 'SHELL_NONPRINT_3/256"')) or 'SHELL_NONPRINT_3/256"'
+opening_filter = as_text(input_value(5, "DOOR - Opening Wall"))
+opening_text_template = as_text(input_value(6, 'BULKHEAD @ {height} A.F.F.'))
+opening_text_type_name = as_text(input_value(7, 'SHELL_NONPRINT_3/256"')) or 'SHELL_NONPRINT_3/256"'
+opening_line_style_name = as_text(input_value(8, "SHELL_OVERHEAD")) or "SHELL_OVERHEAD"
+finish_gap_mm = as_float(input_value(9, 25.0), 25.0)
+opening_offset_mm = 0.0  # Fixed: label is centred on the traced opening footprint
+opening_rotation_deg = as_float(input_value(11, -1.0), -1.0)
+reposition_existing_tags = as_bool(input_value(12, True), True)
+
+doc = DocumentManager.Instance.CurrentDBDocument
+uiapp = DocumentManager.Instance.CurrentUIApplication
+view = doc.ActiveView
+
+FT_PER_MM = 1.0 / 304.8
+FT_PER_INCH = 1.0 / 12.0
+
+report = {
+    "Status": "Started",
+    "ActiveView": "",
+    "Level": "",
+    "RoomsScanned": 0,
+    "RoomsCreated": 0,
+    "PotentialUnoccupiedCircuits": 0,
+    "RoomCircuitsScanned": 0,
+    "RoomsSkippedAlreadyTagged": 0,
+    "RoomTagsCreated": 0,
+    "FinishNotesCreated": 0,
+    "FinishNotesUpdated": 0,
+    "OpeningInstancesMatched": 0,
+    "OpeningInstancesSkippedByElevation": 0,
+    "OpeningInstancesScanned": 0,
+    "RoomTagTypeRequested": room_tag_type_name,
+    "OpeningFilter": opening_filter,
+    "RequestedOpeningLineStyle": opening_line_style_name,
+    "ResolvedOpeningLineStyle": None,
+    "OpeningLinesCreated": 0,
+    "OpeningLinesAlreadyPresent": 0,
+    "OpeningNotesCreated": 0,
+    "OpeningNotesUpdated": 0,
+    "Warnings": [],
+    "UnmappedCeilingTypes": [],
+    "UnmappedFlooringTypes": [],
+    "UI": "Pending"
+}
+
+def add_warning(message):
+    if message not in report["Warnings"]:
+        report["Warnings"].append(message)
+
+def norm(value):
+    s = str(value or "").strip().lower()
+    s = s.replace("\u2019", "'").replace("\u2032", "'")
+    s = s.replace("\u201c", '"').replace("\u201d", '"').replace("\u2033", '"')
+    s = s.replace("\u2013", "-").replace("\u2014", "-")
+    s = re.sub(r"\s+", " ", s)
+    return s
+
+def mm_to_ft(value_mm):
+    return float(value_mm) * FT_PER_MM
+
+def xyz_distance_xy(a, b):
+    return math.sqrt((a.X - b.X) ** 2 + (a.Y - b.Y) ** 2)
+
+def xyz_distance(a, b):
+    return math.sqrt((a.X - b.X) ** 2 + (a.Y - b.Y) ** 2 + (a.Z - b.Z) ** 2)
+
+def get_element_name(element):
+    try:
+        name = element.Name
+        if name: return str(name)
+    except Exception: pass
+    try:
+        p = element.get_Parameter(BuiltInParameter.SYMBOL_NAME_PARAM)
+        if p and p.AsString(): return p.AsString()
+    except Exception: pass
+    return ""
+
+# -----------------------------------------------------------------------------
+# EXCEL READER
+# -----------------------------------------------------------------------------
+NS_MAIN = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+NS_REL = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+NS_PKG_REL = "http://schemas.openxmlformats.org/package/2006/relationships"
+
+def excel_col_number(cell_ref):
+    match = re.match(r"([A-Z]+)", str(cell_ref).upper())
+    if not match: return 0
+    number = 0
+    for char in match.group(1):
+        number = number * 26 + (ord(char) - ord('A') + 1)
+    return number
+
+def read_xlsx_sheets(path):
+    if not path or not os.path.isfile(path):
+        raise Exception("Excel file path is blank or does not exist: {}".format(path))
+    sheets_data = {}
+    with zipfile.ZipFile(path, "r") as archive:
+        names = set(archive.namelist())
+        shared_strings = []
+        if "xl/sharedStrings.xml" in names:
+            root = ET.fromstring(archive.read("xl/sharedStrings.xml"))
+            for si in root.findall(".//{{{}}}si".format(NS_MAIN)):
+                pieces = []
+                for t in si.findall(".//{{{}}}t".format(NS_MAIN)):
+                    pieces.append(t.text or "")
+                shared_strings.append("".join(pieces))
+
+        workbook_root = ET.fromstring(archive.read("xl/workbook.xml"))
+        rel_root = ET.fromstring(archive.read("xl/_rels/workbook.xml.rels"))
+        rel_targets = {}
+        for rel in rel_root.findall(".//{{{}}}Relationship".format(NS_PKG_REL)):
+            rid = rel.attrib.get("Id")
+            target = rel.attrib.get("Target", "")
+            if target.startswith("/"): normalized_target = target.lstrip("/")
+            else: normalized_target = posixpath.normpath(posixpath.join("xl", target))
+            rel_targets[rid] = normalized_target
+
+        sheets_node = workbook_root.find(".//{{{}}}sheets".format(NS_MAIN))
+        if sheets_node is None: raise Exception("Workbook does not contain a sheets list.")
+
+        for sheet_node in list(sheets_node):
+            sheet_name = sheet_node.attrib.get("name", "")
+            rel_id = sheet_node.attrib.get("{{{}}}id".format(NS_REL), "")
+            target = rel_targets.get(rel_id, "")
+            if not target or target not in names:
+                fallback = "xl/worksheets/{}.xml".format(os.path.basename(target).replace(".xml", ""))
+                if fallback in names: target = fallback
+                else: continue
+
+            sheet_root = ET.fromstring(archive.read(target))
+            rows = []
+            sheet_data = sheet_root.find(".//{{{}}}sheetData".format(NS_MAIN))
+            if sheet_data is not None:
+                for row_node in list(sheet_data):
+                    row_values = {}
+                    for cell in row_node.findall(".//{{{}}}c".format(NS_MAIN)):
+                        ref = cell.attrib.get("r", "")
+                        col = excel_col_number(ref)
+                        cell_type = cell.attrib.get("t", "")
+                        value_node = cell.find("{{{}}}v".format(NS_MAIN))
+                        value = ""
+                        if cell_type == "inlineStr":
+                            value = "".join((t.text or "") for t in cell.findall(".//{{{}}}t".format(NS_MAIN)))
+                        elif value_node is not None:
+                            raw = value_node.text or ""
+                            if cell_type == "s":
+                                try: value = shared_strings[int(raw)]
+                                except Exception: value = raw
+                            else: value = raw
+                        row_values[col] = str(value).strip()
+                    if row_values:
+                        max_col = max(row_values.keys())
+                        rows.append([row_values.get(i, "") for i in range(1, max_col + 1)])
+            sheets_data[sheet_name] = rows
+    return sheets_data
+
+def build_type_map(rows, sheet_label):
+    mapping = {}
+    if not rows:
+        add_warning("Excel sheet '{}' is empty or could not be read.".format(sheet_label))
+        return mapping
+    for row in rows:
+        if len(row) < 2: continue
+        type_name = str(row[0] or "").strip()
+        shortcut = str(row[1] or "").strip()
+        if not type_name or not shortcut: continue
+        if norm(type_name) in ("type", "ceiling type", "flooring type") and norm(shortcut) in ("shortcut", "short code", "code"): continue
+        mapping[norm(type_name)] = {"type": type_name, "shortcut": shortcut}
+    return mapping
+
+def find_shortcut(type_name, mapping):
+    entry = mapping.get(norm(type_name))
+    return entry.get("shortcut", "") if entry else ""
+
+# -----------------------------------------------------------------------------
+# ROOM GEOMETRY & SPATIAL SAMPLING
+# -----------------------------------------------------------------------------
+def get_double_parameter(element, builtin_parameter, default_value=0.0):
+    try:
+        parameter = element.get_Parameter(builtin_parameter)
+        if parameter and parameter.StorageType == StorageType.Double:
+            return parameter.AsDouble()
+    except Exception: pass
+    return default_value
+
+def get_element_bbox(element):
+    try: return element.get_BoundingBox(None)
+    except Exception: return None
+
+def get_room_base_elevation(room):
+    try:
+        level = doc.GetElement(room.LevelId)
+        elevation = level.Elevation if level else 0.0
+    except Exception: elevation = 0.0
+    lower_offset = get_double_parameter(room, BuiltInParameter.ROOM_LOWER_OFFSET, 0.0)
+    return elevation + lower_offset
+
+def get_room_upper_elevation(room, base_elevation):
+    try:
+        upper_param = room.get_Parameter(BuiltInParameter.ROOM_UPPER_LEVEL)
+        offset = get_double_parameter(room, BuiltInParameter.ROOM_UPPER_OFFSET, 0.0)
+        if upper_param:
+            upper_id = upper_param.AsElementId()
+            if upper_id and upper_id != ElementId.InvalidElementId:
+                upper_level = doc.GetElement(upper_id)
+                if upper_level and hasattr(upper_level, "Elevation"):
+                    result = upper_level.Elevation + offset
+                    if result > base_elevation + 5.0: return result
+    except Exception: pass
+    bbox = get_element_bbox(room)
+    if bbox and bbox.Max.Z > base_elevation + 5.0: return bbox.Max.Z
+    return None
+
+def room_boundary_loops(room):
+    loops = []
+    try:
+        options = SpatialElementBoundaryOptions()
+        segments_by_loop = room.GetBoundarySegments(options)
+        if segments_by_loop:
+            for segment_loop in segments_by_loop:
+                pts = []
+                for segment in segment_loop:
+                    curve = segment.GetCurve()
+                    try: tessellated = list(curve.Tessellate())
+                    except Exception: tessellated = [curve.GetEndPoint(0), curve.GetEndPoint(1)]
+                    for pt in tessellated:
+                        pair = (pt.X, pt.Y)
+                        if not pts or abs(pts[-1][0] - pair[0]) > 1e-7 or abs(pts[-1][1] - pair[1]) > 1e-7:
+                            pts.append(pair)
+                if len(pts) >= 3: loops.append(pts)
+    except Exception: pass
+    return loops
+
+def room_sample_points(room, base_elevation, sample_count=7):
+    bbox = get_element_bbox(room)
+    if not bbox: return []
+    width = bbox.Max.X - bbox.Min.X
+    height = bbox.Max.Y - bbox.Min.Y
+    z = base_elevation + min(3.0, max(1.0, (bbox.Max.Z - base_elevation) * 0.35))
+    samples = []
+    if width > 1e-4 and height > 1e-4:
+        for ix in range(1, sample_count + 1):
+            x = bbox.Min.X + width * ix / float(sample_count + 1)
+            for iy in range(1, sample_count + 1):
+                y = bbox.Min.Y + height * iy / float(sample_count + 1)
+                point = XYZ(x, y, z)
+                try:
+                    if room.IsPointInRoom(point): samples.append((x, y))
+                except Exception: pass
+    return samples
+
+def compute_room_most_empty_space(room, base_elevation, view_elevation):
+    loops = room_boundary_loops(room)
+    bbox = get_element_bbox(room)
+    if not bbox: return None
+    room_top = get_room_upper_elevation(room, base_elevation)
+    if room_top is None or room_top <= base_elevation: room_top = bbox.Max.Z
+    vertical_span = max(0.5, room_top - base_elevation)
+    z_test = base_elevation + min(3.0, max(0.5, vertical_span * 0.5))
+
+    segments = []
+    for points in loops:
+        if len(points) < 2: continue
+        for index in range(len(points)):
+            a = points[index]
+            b = points[(index + 1) % len(points)]
+            segments.append((a[0], a[1], b[0], b[1]))
+
+    min_x, max_x = bbox.Min.X, bbox.Max.X
+    min_y, max_y = bbox.Min.Y, bbox.Max.Y
+    best_xy = None
+    best_clearance = -1.0
+    grid_count = 25
+
+    def point_segment_distance(px, py, ax, ay, bx, by):
+        dx, dy = bx - ax, by - ay
+        length_sq = dx * dx + dy * dy
+        if length_sq <= 1e-12: return math.sqrt((px - ax) ** 2 + (py - ay) ** 2)
+        t = ((px - ax) * dx + (py - ay) * dy) / length_sq
+        t = max(0.0, min(1.0, t))
+        qx, qy = ax + t * dx, ay + t * dy
+        return math.sqrt((px - qx) ** 2 + (py - qy) ** 2)
+
+    for ix in range(1, grid_count):
+        x = min_x + (max_x - min_x) * ix / float(grid_count)
+        for iy in range(1, grid_count):
+            y = min_y + (max_y - min_y) * iy / float(grid_count)
+            try:
+                if not room.IsPointInRoom(XYZ(x, y, z_test)): continue
+            except Exception: continue
+            clearance = min(point_segment_distance(x, y, ax, ay, bx, by) for ax, ay, bx, by in segments) if segments else 0.0
+            if clearance > best_clearance:
+                best_xy = (x, y)
+                best_clearance = clearance
+
+    if best_xy: return XYZ(best_xy[0], best_xy[1], view_elevation)
+    return XYZ((min_x + max_x) * 0.5, (min_y + max_y) * 0.5, view_elevation)
+
+def bbox_xy_contains(bbox, xy, tolerance=0.03):
+    x, y = xy
+    return (bbox.Min.X - tolerance <= x <= bbox.Max.X + tolerance and
+            bbox.Min.Y - tolerance <= y <= bbox.Max.Y + tolerance)
+
+def get_type_name(element):
+    try:
+        type_element = doc.GetElement(element.GetTypeId())
+        if type_element: return str(type_element.Name)
+    except Exception: pass
+    return ""
+
+def collect_spatial_type_groups(elements, room, samples, base_elevation, upper_elevation, category_kind):
+    if not samples:
+        center = compute_room_most_empty_space(room, base_elevation, base_elevation)
+        if center: samples = [(center.X, center.Y)]
+    if not samples: return []
+
+    room_bbox = get_element_bbox(room)
+    total = float(len(samples))
+    groups = {}
+    for element in elements:
+        bbox = get_element_bbox(element)
+        if not bbox: continue
+        if room_bbox and (bbox.Max.X < room_bbox.Min.X or bbox.Min.X > room_bbox.Max.X or
+                          bbox.Max.Y < room_bbox.Min.Y or bbox.Min.Y > room_bbox.Max.Y):
+            continue
+
+        if category_kind == "floor":
+            surface_z = bbox.Max.Z
+            if surface_z < base_elevation - 2.0 or surface_z > base_elevation + 2.5: continue
+            z_value = surface_z
+        else:
+            surface_z = bbox.Min.Z
+            if surface_z < base_elevation + 5.0: continue
+            if upper_elevation is not None and surface_z > upper_elevation + 2.0: continue
+            z_value = surface_z
+
+        covered_indices = set()
+        for i, xy in enumerate(samples):
+            if bbox_xy_contains(bbox, xy): covered_indices.add(i)
+        if not covered_indices: continue
+
+        type_name = get_type_name(element)
+        if not type_name: continue
+        key = norm(type_name)
+        if key not in groups:
+            groups[key] = {"type": type_name, "covered": set(), "elements": [], "weighted_z": 0.0, "weight": 0.0, "max_surface_z": None}
+        group = groups[key]
+        group["covered"].update(covered_indices)
+        weight = float(len(covered_indices))
+        group["weighted_z"] += z_value * weight
+        group["weight"] += weight
+        if group["max_surface_z"] is None: group["max_surface_z"] = z_value
+        else:
+            if category_kind == "floor": group["max_surface_z"] = max(group["max_surface_z"], z_value)
+            else: group["max_surface_z"] = min(group["max_surface_z"], z_value)
+        group["elements"].append(element)
+
+    results = []
+    for key, group in groups.items():
+        coverage = len(group["covered"]) / total
+        avg_z = group["weighted_z"] / group["weight"] if group["weight"] > 0 else group["max_surface_z"]
+        results.append({
+            "type": group["type"], "coverage": coverage,
+            "z": group["max_surface_z"] if group["max_surface_z"] is not None else avg_z,
+            "avg_z": avg_z, "elements": group["elements"]
+        })
+
+    if category_kind == "floor":
+        results.sort(key=lambda item: (item["coverage"], item["z"]), reverse=True)
+    else:
+        ceiling_target_z = upper_elevation if upper_elevation is not None else base_elevation + 10.0
+        results.sort(key=lambda item: (item["coverage"], -abs(item["z"] - ceiling_target_z)), reverse=True)
+    return results
+
+def format_feet_inches(height_ft):
+    total_inches = int(round(float(height_ft) * 12.0))
+    if total_inches < 0: sign = "-"; total_inches = abs(total_inches)
+    else: sign = ""
+    feet = total_inches // 12
+    inches = total_inches % 12
+    return "{}{}'-{}\"".format(sign, feet, inches)
+
+def is_cooler_or_freezer(room_name, ceiling_type_name="", floor_type_name=""):
+    combined = norm("{} {} {}".format(room_name or "", ceiling_type_name or "", floor_type_name or "")).upper()
+    tokens = ("COOLER", "FREEZER", "WALK-IN", "WALK IN", "WALKIN", "INSULATED FREEZER")
+    return any(token in combined for token in tokens)
+
+def get_room_display_name(room):
+    try: return str(room.get_Parameter(BuiltInParameter.ROOM_NAME).AsString() or room.Name)
+    except Exception:
+        try: return str(room.Name)
+        except Exception: return ""
+
+# -----------------------------------------------------------------------------
+# ANNOTATION & LINE STYLE COLLECTORS (ROBUST)
+# -----------------------------------------------------------------------------
+def get_all_text_note_types():
+    """Collect actual TextNoteType elements using multiple Revit API routes."""
+    text_types = []
+    seen_ids = set()
+
+    def add_type(element):
+        if element is None:
+            return
+        try:
+            if not isinstance(element, TextNoteType):
+                return
+            eid = element.Id.IntegerValue
+            if eid not in seen_ids:
+                seen_ids.add(eid)
+                text_types.append(element)
+        except Exception:
+            pass
+
+    # Preferred collector: explicit API class.
+    try:
+        collector = FilteredElementCollector(doc).OfClass(TextNoteType)
+        for element in collector.ToElements():
+            add_type(element)
+    except Exception:
+        pass
+
+    # Fallback: all element types in the Text Notes category.
+    try:
+        collector = (FilteredElementCollector(doc)
+                     .OfCategory(BuiltInCategory.OST_TextNotes)
+                     .WhereElementIsElementType())
+        for element in collector.ToElements():
+            add_type(element)
+    except Exception:
+        pass
+
+    # Final fallback: inspect all element types and retain only TextNoteType.
+    if not text_types:
+        try:
+            for element in FilteredElementCollector(doc).WhereElementIsElementType().ToElements():
+                add_type(element)
+        except Exception:
+            pass
+
+    text_types.sort(key=lambda element: (norm(get_element_name(element)),
+                                         element.Id.IntegerValue))
+    if not text_types:
+        add_warning("No Text Note Types were found. Check that the project contains loaded Text Note Types.")
+    return text_types
+
+def find_type_by_name(category_id, type_name):
+    if not type_name:
+        return None
+    key = norm(type_name)
+    candidates = get_all_text_note_types()
+    for element in candidates:
+        if norm(get_element_name(element)) == key:
+            return element
+    # Do not silently choose an unrelated type when the requested type is missing.
+    if candidates:
+        add_warning("Requested Text Note Type '{}' was not found. Available types: {}".format(
+            type_name, ", ".join(get_element_name(x) for x in candidates[:20])))
+    return None
+
+def find_room_tag_type_flexible(name):
+    if not name: return None
+    key = norm(name)
+    try:
+        candidates = FilteredElementCollector(doc).OfCategory(BuiltInCategory.OST_RoomTags).WhereElementIsElementType().ToElements()
+        for x in candidates:
+            fam_name = ""
+            try: fam_name = str(x.Family.Name)
+            except Exception: pass
+            type_name = get_element_name(x)
+            combined = norm("{} : {}".format(fam_name, type_name))
+            if key == norm(type_name) or key == combined or key in combined: return x
+        if candidates: return candidates[0]
+    except Exception: pass
+    return None
+
+def get_line_style(style_name):
+    """Resolve a projection GraphicsStyle from the document's Lines subcategories."""
+    if not style_name or str(style_name).startswith("<"):
+        add_warning("No valid overhead line style selected.")
+        return None
+
+    wanted = norm(style_name)
+    compact_wanted = re.sub(r"[\s_\-]+", "", wanted)
+    found = {}
+    try:
+        lines_category = doc.Settings.Categories.get_Item(BuiltInCategory.OST_Lines)
+        for subcat in lines_category.SubCategories:
+            try:
+                graphics = subcat.GetGraphicsStyle(GraphicsStyleType.Projection)
+                if graphics:
+                    name = str(subcat.Name)
+                    found[norm(name)] = (name, graphics)
+            except Exception:
+                pass
+    except Exception as ex:
+        add_warning("Unable to read Lines subcategories: {}".format(ex))
+
+    # Exact match first.
+    if wanted in found:
+        return found[wanted][1]
+
+    # Compare without spaces, underscores, or hyphens.
+    for key, pair in found.items():
+        compact_name = re.sub(r"[\s_\-]+", "", key)
+        if compact_name == compact_wanted:
+            return pair[1]
+
+    # Allow only a unique partial match to prevent selecting the wrong style.
+    partial = []
+    if compact_wanted:
+        for key, pair in found.items():
+            compact_name = re.sub(r"[\s_\-]+", "", key)
+            if compact_wanted in compact_name or compact_name in compact_wanted:
+                partial.append(pair)
+    if len(partial) == 1:
+        add_warning("Line style '{}' resolved to '{}'.".format(style_name, partial[0][0]))
+        return partial[0][1]
+
+    available = sorted(pair[0] for pair in found.values())
+    add_warning("Line style '{}' not resolved. Available line styles: {}".format(
+        style_name, ", ".join(available[:60])))
+    return None
+
+def textnote_point(note):
+    try: return note.Coord
+    except Exception: pass
+    try:
+        location = note.Location
+        if isinstance(location, LocationPoint): return location.Point
+    except Exception: pass
+    return None
+
+def set_textnote_location(note, target):
+    current = textnote_point(note)
+    if current is None: return
+    if xyz_distance(current, target) > 1e-5:
+        delta = XYZ(target.X - current.X, target.Y - current.Y, target.Z - current.Z)
+        ElementTransformUtils.MoveElement(doc, note.Id, delta)
+
+def find_nearby_textnote(notes, target, type_id, tolerance_ft=0.06):
+    for note in notes:
+        try:
+            if note.GetTypeId() != type_id: continue
+            point = textnote_point(note)
+            if point and xyz_distance_xy(point, target) <= tolerance_ft and abs(point.Z - target.Z) <= 0.15:
+                return note
+        except Exception: continue
+    return None
+
+def rotate_textnote_to_angle(note, target, desired_angle):
+    """Rotate a Revit TextNote with ElementTransformUtils (Rotation may be read-only)."""
+    if note is None:
+        return False
+    try:
+        desired = bh_normalize_text_angle(float(desired_angle))
+    except Exception:
+        desired = 0.0
+
+    current = 0.0
+    try:
+        current = float(note.Rotation)
+    except Exception:
+        current = 0.0
+
+    delta = desired - current
+    # Normalize delta to the smallest equivalent half-turn.
+    while delta > math.pi * 0.5:
+        delta -= math.pi
+    while delta <= -math.pi * 0.5:
+        delta += math.pi
+    if abs(delta) < 1e-5:
+        return True
+
+    try:
+        axis = Line.CreateBound(
+            XYZ(target.X, target.Y, target.Z - 1.0),
+            XYZ(target.X, target.Y, target.Z + 1.0))
+        ElementTransformUtils.RotateElement(doc, note.Id, axis, delta)
+        return True
+    except Exception as ex:
+        add_warning("Could not rotate bulkhead text note {}: {}".format(
+            note.Id.IntegerValue, ex))
+        return False
+
+
+def upsert_textnote(notes, target, text, text_type, rotation_radians=0.0):
+    if text_type is None:
+        return None, "missing_type"
+
+    note = find_nearby_textnote(notes, target, text_type.Id)
+    if note:
+        try:
+            set_textnote_location(note, target)
+            if note.Text != text:
+                note.Text = text
+            try:
+                note.HorizontalAlignment = HorizontalTextAlignment.Center
+            except Exception:
+                pass
+            rotate_textnote_to_angle(note, target, rotation_radians)
+            return note, "updated"
+        except Exception as ex:
+            add_warning("Could not update TextNote: {}".format(ex))
+
+    options = TextNoteOptions(text_type.Id)
+    # Use center justification so the insertion point is the visual midpoint of the label.
+    options.HorizontalAlignment = HorizontalTextAlignment.Center
+    new_note = TextNote.Create(doc, view.Id, target, text, options)
+    notes.append(new_note)
+    rotate_textnote_to_angle(new_note, target, rotation_radians)
+    return new_note, "created"
+
+def get_room_from_tag(tag):
+    try: return tag.Room
+    except Exception: return None
+
+def get_room_tags_in_view():
+    tags_by_room = {}
+    try:
+        tags = FilteredElementCollector(doc, view.Id).OfCategory(BuiltInCategory.OST_RoomTags).WhereElementIsNotElementType().ToElements()
+        for tag in tags:
+            room = get_room_from_tag(tag)
+            if room: tags_by_room.setdefault(room.Id, []).append(tag)
+    except Exception as ex: add_warning("Could not collect room tags in view: {}".format(ex))
+    return tags_by_room
+
+def get_tag_bbox(tag):
+    try: return tag.get_BoundingBox(view)
+    except Exception: return None
+
+def line_endpoints(curve):
+    try: return curve.GetEndPoint(0), curve.GetEndPoint(1)
+    except Exception: return None, None
+
+def detail_curve_matches(existing_curves, p1, p2, style_name, tolerance_ft=0.03):
+    for curve_element in existing_curves:
+        try:
+            curve_style_name = curve_element.LineStyle.Name if curve_element.LineStyle else ""
+            if norm(curve_style_name) != norm(style_name): continue
+            geom_curve = curve_element.GeometryCurve
+            q1, q2 = line_endpoints(geom_curve)
+            if q1 is None: continue
+            direct = xyz_distance_xy(p1, q1) <= tolerance_ft and xyz_distance_xy(p2, q2) <= tolerance_ft
+            reverse = xyz_distance_xy(p1, q2) <= tolerance_ft and xyz_distance_xy(p2, q1) <= tolerance_ft
+            if direct or reverse: return True
+        except Exception: continue
+    return False
+
+def opening_axis_xy(instance):
+    # Prefer the host wall direction when the family is hosted.
+    try:
+        host = instance.Host
+        location = host.Location if host else None
+        if isinstance(location, LocationCurve):
+            curve = location.Curve
+            p0 = curve.GetEndPoint(0)
+            p1 = curve.GetEndPoint(1)
+            dx, dy = p1.X - p0.X, p1.Y - p0.Y
+            mag = math.sqrt(dx * dx + dy * dy)
+            if mag > 1e-8:
+                return dx / mag, dy / mag
+    except Exception:
+        pass
+
+    # Generic Model opening families are often unhosted; use their instance axes.
+    for attr in ("HandOrientation", "FacingOrientation"):
+        try:
+            direction = getattr(instance, attr)
+            dx, dy = direction.X, direction.Y
+            mag = math.sqrt(dx * dx + dy * dy)
+            if mag > 1e-8:
+                return dx / mag, dy / mag
+        except Exception:
+            pass
+
+    # Last resort: infer the long axis from the instance bounding box.
+    bbox = get_element_bbox(instance)
+    if bbox:
+        dx = abs(bbox.Max.X - bbox.Min.X)
+        dy = abs(bbox.Max.Y - bbox.Min.Y)
+        if dx > 1e-6 or dy > 1e-6:
+            if dx >= dy:
+                return (1.0, 0.0)
+            return (0.0, 1.0)
+    return None
+
+def opening_width_ft(instance, axis=None):
+    """Return opening width from parameters or bbox projected onto the detected wall axis."""
+    for bip in (BuiltInParameter.DOOR_WIDTH, BuiltInParameter.FAMILY_WIDTH_PARAM):
+        try:
+            parameter = instance.get_Parameter(bip)
+            if parameter and parameter.StorageType == StorageType.Double and parameter.AsDouble() > 0.05:
+                return parameter.AsDouble()
+        except Exception:
+            pass
+    try:
+        symbol = doc.GetElement(instance.GetTypeId())
+        for bip in (BuiltInParameter.DOOR_WIDTH, BuiltInParameter.FAMILY_WIDTH_PARAM):
+            parameter = symbol.get_Parameter(bip) if symbol else None
+            if parameter and parameter.StorageType == StorageType.Double and parameter.AsDouble() > 0.05:
+                return parameter.AsDouble()
+    except Exception:
+        pass
+
+    bbox = get_element_bbox(instance)
+    if bbox is None:
+        return 0.0
+    if axis is None:
+        axis = opening_axis_xy(instance)
+    if axis is None:
+        return 0.0
+    hx, hy = axis
+    corners = [
+        (bbox.Min.X, bbox.Min.Y), (bbox.Min.X, bbox.Max.Y),
+        (bbox.Max.X, bbox.Min.Y), (bbox.Max.X, bbox.Max.Y)
+    ]
+    projections = [x * hx + y * hy for x, y in corners]
+    width = max(projections) - min(projections)
+    return width if width > 0.05 else 0.0
+
+def get_opening_height_text(instance):
+    """Return opening top elevation above the active plan level, formatted as feet/inches."""
+    top_z = None
+    bbox = get_element_bbox(instance)
+    if bbox is not None:
+        try:
+            top_z = bbox.Max.Z
+        except Exception:
+            top_z = None
+
+    # Prefer explicit top/head elevation parameters when available.
+    for pname in ("Head Height", "Opening Head Height", "Top Elevation", "Sill Height"):
+        try:
+            p = instance.LookupParameter(pname)
+            if p and p.StorageType == StorageType.Double and p.AsDouble() > 0.1:
+                value = p.AsDouble()
+                # Head/top parameters are commonly level-relative. Use only plausible values.
+                if value < 1000.0:
+                    if pname == "Sill Height":
+                        continue
+                    top_z = (view.GenLevel.Elevation + value) if view and view.GenLevel else value
+                    break
+        except Exception:
+            pass
+
+    if top_z is None:
+        add_warning("Opening '{}': top elevation could not be detected; no AFF height text created.".format(
+            get_element_name(instance)))
+        return ""
+
+    base_z = 0.0
+    try:
+        base_z = view.GenLevel.Elevation if view and view.GenLevel else 0.0
+    except Exception:
+        pass
+    height_above_level = top_z - base_z
+    if height_above_level <= 0.1:
+        add_warning("Opening '{}': detected top elevation is not above the active level.".format(
+            get_element_name(instance)))
+        return ""
+    return format_feet_inches(height_above_level)
+
+def get_family_and_type_names(instance):
+    """Read family/type names using multiple Revit API routes."""
+    family_name = ""
+    symbol_name = ""
+    try:
+        type_id = instance.GetTypeId()
+        symbol = doc.GetElement(type_id) if type_id and type_id != ElementId.InvalidElementId else None
+        if symbol:
+            try:
+                symbol_name = str(symbol.Name or "")
+            except Exception:
+                pass
+            try:
+                family = symbol.Family
+                if family:
+                    family_name = str(family.Name or "")
+            except Exception:
+                pass
+            if not family_name:
+                try:
+                    p = symbol.get_Parameter(BuiltInParameter.SYMBOL_FAMILY_NAME_PARAM)
+                    if p and p.AsString():
+                        family_name = str(p.AsString())
+                except Exception:
+                    pass
+    except Exception:
+        pass
+    if not symbol_name:
+        try:
+            symbol_name = str(instance.Name or "")
+        except Exception:
+            pass
+    return family_name, symbol_name
+
+def opening_matches_filter(instance, filter_text):
+    """Robustly match a Generic Model opening by Family, Type, or Family:Type."""
+    if not filter_text:
+        return False
+    family_name, type_name = get_family_and_type_names(instance)
+    candidates = [family_name, type_name, get_element_name(instance)]
+
+    # Also query type element explicitly; FamilyInstance.Symbol can fail for some content.
+    try:
+        type_id = instance.GetTypeId()
+        symbol = doc.GetElement(type_id) if type_id and type_id != ElementId.InvalidElementId else None
+        if symbol:
+            try:
+                candidates.append(str(symbol.Name))
+            except Exception:
+                pass
+            try:
+                p = symbol.get_Parameter(BuiltInParameter.SYMBOL_FAMILY_NAME_PARAM)
+                if p and p.AsString():
+                    candidates.append(str(p.AsString()))
+            except Exception:
+                pass
+            try:
+                family = symbol.Family
+                if family:
+                    candidates.append(str(family.Name))
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    # Read likely instance/type parameters that may carry the family name.
+    for owner in (instance,):
+        for pname in ("Family", "Family Name", "Type", "Type Name", "Comments", "Mark"):
+            try:
+                p = owner.LookupParameter(pname)
+                if p:
+                    value = p.AsString()
+                    if value:
+                        candidates.append(str(value))
+            except Exception:
+                pass
+
+    target = norm(filter_text)
+    compact_target = re.sub(r"[^a-z0-9]+", "", target)
+    for value in candidates:
+        candidate = norm(value)
+        if not candidate:
+            continue
+        compact_candidate = re.sub(r"[^a-z0-9]+", "", candidate)
+        if target == candidate or target in candidate or (compact_target and compact_target in compact_candidate):
+            return True
+    return False
+
+def get_phase_for_view(target_view):
+    try:
+        phase_param = target_view.get_Parameter(BuiltInParameter.VIEW_PHASE)
+        if phase_param:
+            phase_id = phase_param.AsElementId()
+            if phase_id and phase_id != ElementId.InvalidElementId:
+                phase = doc.GetElement(phase_id)
+                if phase: return phase
+    except Exception: pass
+    try:
+        phases = list(doc.Phases)
+        if phases: return phases[-1]
+    except Exception: pass
+    return None
+
+def get_plan_circuits(level, target_view):
+    phase = get_phase_for_view(target_view)
+    topology = None
+    try:
+        if phase: topology = doc.get_PlanTopology(level, phase)
+    except Exception: topology = None
+    if topology is None:
+        try: topology = doc.get_PlanTopology(level)
+        except Exception: topology = None
+    if topology is None: return []
+    try: return list(topology.Circuits)
+    except Exception: return []
+
+def create_missing_room_elements(level, target_view, default_name):
+    created = 0
+    initial_circuits = get_plan_circuits(level, target_view)
+    report["RoomCircuitsScanned"] = len(initial_circuits)
+    initial_empty = []
+    for circuit in initial_circuits:
+        try:
+            if float(circuit.Area) > 1.0 and not bool(circuit.IsRoomLocated):
+                initial_empty.append(circuit)
+        except Exception: continue
+    report["PotentialUnoccupiedCircuits"] = len(initial_empty)
+
+    attempted_points = set()
+    max_attempts = max(5, len(initial_empty) * 2 + 2)
+    for _ in range(max_attempts):
+        fresh_circuits = get_plan_circuits(level, target_view)
+        candidates = []
+        for circuit in fresh_circuits:
+            try:
+                if float(circuit.Area) <= 1.0 or bool(circuit.IsRoomLocated): continue
+                uv = circuit.GetPointInside()
+                point_key = (round(float(uv.U), 2), round(float(uv.V), 2))
+                if point_key in attempted_points: continue
+                candidates.append((float(circuit.Area), circuit, uv, point_key))
+            except Exception: continue
+        if not candidates: break
+        candidates.sort(key=lambda item: item[0])
+        area, circuit, uv, point_key = candidates[0]
+        attempted_points.add(point_key)
+        new_room = None
+        try: new_room = doc.Create.NewRoom(None, circuit)
+        except Exception:
+            try: new_room = doc.Create.NewRoom(level, uv)
+            except Exception: pass
+        if new_room:
+            if default_name:
+                try: new_room.Name = default_name
+                except Exception: pass
+            created += 1
+            try: doc.Regenerate()
+            except Exception: pass
+    report["RoomsCreated"] += created
+    return created
+
+
+# -----------------------------------------------------------------------------
+# RE-RUN SAFE BULKHEAD ANNOTATION TRACKING
+# -----------------------------------------------------------------------------
+# Generated outlines/labels are tagged with Extensible Storage so a changed
+# opening height/footprint can replace its previous annotations on the next run.
+BH_TRACKING_GUID = System.Guid("8f8f71d4-4f83-4e9d-a5e0-7f0c66a28d91")
+
+def bh_tracking_schema():
+    schema = Schema.Lookup(BH_TRACKING_GUID)
+    if schema:
+        return schema
+    builder = SchemaBuilder(BH_TRACKING_GUID)
+    builder.SetSchemaName("WD_Bulkhead_AutoAnnotation_Tracking")
+    builder.SetDocumentation("Tracks bulkhead annotations generated by the WD Dynamo tool.")
+    builder.SetReadAccessLevel(AccessLevel.Public)
+    builder.SetWriteAccessLevel(AccessLevel.Public)
+    builder.AddSimpleField("OpeningId", System.Int32)
+    builder.AddSimpleField("Kind", System.String)
+    return builder.Finish()
+
+def bh_tag_generated_annotation(element, opening_id, kind):
+    try:
+        schema = bh_tracking_schema()
+        entity = Entity(schema)
+        entity.Set[System.Int32](schema.GetField("OpeningId"), System.Int32(opening_id))
+        entity.Set[System.String](schema.GetField("Kind"), System.String(str(kind)))
+        element.SetEntity(entity)
+        return True
+    except Exception as ex:
+        add_warning("Could not track generated bulkhead annotation: {}".format(ex))
+        return False
+
+def bh_get_tracked_opening_id(element):
+    try:
+        schema = Schema.Lookup(BH_TRACKING_GUID)
+        if schema is None:
+            return None
+        entity = element.GetEntity(schema)
+        if not entity or not entity.IsValid():
+            return None
+        return int(entity.Get[System.Int32](schema.GetField("OpeningId")))
+    except Exception:
+        return None
+
+def bh_delete_previous_annotations(opening_ids):
+    """Delete only annotations previously generated by this script for these openings."""
+    target_ids = set(int(x) for x in opening_ids)
+    if not target_ids:
+        return 0
+    schema = Schema.Lookup(BH_TRACKING_GUID)
+    if schema is None:
+        return 0
+    delete_ids = []
+    try:
+        for element in FilteredElementCollector(doc, view.Id).WhereElementIsNotElementType().ToElements():
+            opening_id = bh_get_tracked_opening_id(element)
+            if opening_id in target_ids:
+                delete_ids.append(element.Id)
+        if delete_ids:
+            doc.Delete(System.Collections.Generic.List[ElementId](delete_ids))
+    except Exception as ex:
+        add_warning("Could not replace previous bulkhead annotations: {}".format(ex))
+    return len(delete_ids)
+
+
+# -----------------------------------------------------------------------------
+# BULKHEAD GEOMETRY TRACE HELPERS (from the standalone geometry workflow)
+# -----------------------------------------------------------------------------
+def bh_norm(value):
+    s = str(value or "").strip().lower()
+    s = s.replace(u"\u2019", "'").replace(u"\u2032", "'")
+    s = s.replace(u"\u201c", '"').replace(u"\u201d", '"').replace(u"\u2033", '"')
+    s = re.sub(r"\s+", " ", s)
+    return s
+
+
+def bh_name_of(element):
+    try:
+        return str(element.Name or "")
+    except:
+        return ""
+
+
+def bh_get_family_type(instance, doc):
+    family_name = ""
+    type_name = ""
+    try:
+        symbol = instance.Symbol
+        if symbol:
+            type_name = bh_name_of(symbol)
+            try:
+                family_name = str(symbol.Family.Name or "")
+            except:
+                pass
+    except:
+        pass
+    if not type_name or not family_name:
+        try:
+            type_id = instance.GetTypeId()
+            symbol = doc.GetElement(type_id) if type_id and type_id != ElementId.InvalidElementId else None
+            if symbol:
+                if not type_name:
+                    type_name = bh_name_of(symbol)
+                if not family_name:
+                    try:
+                        family_name = str(symbol.Family.Name or "")
+                    except:
+                        pass
+                if not family_name:
+                    try:
+                        p = symbol.get_Parameter(BuiltInParameter.SYMBOL_FAMILY_NAME_PARAM)
+                        if p and p.AsString():
+                            family_name = str(p.AsString())
+                    except:
+                        pass
+        except:
+            pass
+    if not family_name:
+        try:
+            p = instance.get_Parameter(BuiltInParameter.ELEM_FAMILY_PARAM)
+            if p and p.AsString():
+                family_name = str(p.AsString())
+        except:
+            pass
+    if not type_name:
+        type_name = bh_name_of(instance)
+    return family_name, type_name
+
+def bh_matches(instance, filter_text, doc):
+    family_name, type_name = bh_get_family_type(instance, doc)
+    target = bh_norm(filter_text)
+    fam = bh_norm(family_name)
+    typ = bh_norm(type_name)
+    compact_target = re.sub(r"[^a-z0-9]+", "", target)
+    compact_fam = re.sub(r"[^a-z0-9]+", "", fam)
+    compact_typ = re.sub(r"[^a-z0-9]+", "", typ)
+    return bool(target) and (
+        target == fam or target == typ or target in fam or target in typ or
+        (compact_target and (compact_target in compact_fam or compact_target in compact_typ))
+    )
+
+def bh_get_line_style(doc, wanted):
+    candidates = []
+    try:
+        lines_cat = doc.Settings.Categories.get_Item(BuiltInCategory.OST_Lines)
+        for subcat in lines_cat.SubCategories:
+            try:
+                gs = subcat.GetGraphicsStyle(GraphicsStyleType.Projection)
+                if gs:
+                    candidates.append((str(subcat.Name), gs))
+            except:
+                pass
+    except:
+        pass
+    key = bh_norm(wanted)
+    compact = re.sub(r"[\s_\-]+", "", key)
+    for name, gs in candidates:
+        if bh_norm(name) == key:
+            return gs, name
+    for name, gs in candidates:
+        if re.sub(r"[\s_\-]+", "", bh_norm(name)) == compact:
+            return gs, name
+    return None, ""
+
+
+def bh_get_text_type(doc, wanted):
+    """Resolve TextNoteType robustly under IronPython2 / Revit 2024."""
+    types = list(FilteredElementCollector(doc).OfClass(TextNoteType).WhereElementIsElementType().ToElements())
+
+    def raw_type_name(typ):
+        # Element.Name is preferred; SYMBOL_NAME_PARAM is a reliable fallback.
+        try:
+            n = typ.Name
+            if n:
+                return str(n)
+        except:
+            pass
+        try:
+            p = typ.get_Parameter(BuiltInParameter.SYMBOL_NAME_PARAM)
+            if p and p.AsString():
+                return str(p.AsString())
+        except:
+            pass
+        return bh_name_of(typ)
+
+    def compact_name(value):
+        value = str(value or "").lower()
+        value = value.replace(u"\u201c", '"').replace(u"\u201d", '"')
+        value = value.replace(u"\u2019", "'").replace(u"\u2018", "'")
+        return re.sub(r"[^a-z0-9]+", "", value)
+
+    wanted_compact = compact_name(wanted)
+    type_names = []
+    for typ in types:
+        n = raw_type_name(typ)
+        type_names.append((typ, n, compact_name(n)))
+
+    # Exact normalized match.
+    for typ, n, compact in type_names:
+        if compact == wanted_compact:
+            return typ, n
+
+    # For this project, tolerate a prefix/suffix added to the requested shell type.
+    if "shellnonprint" in wanted_compact and "3256" in wanted_compact:
+        candidates = []
+        for typ, n, compact in type_names:
+            if "shellnonprint" in compact and "3256" in compact:
+                candidates.append((typ, n, compact))
+        if candidates:
+            candidates.sort(key=lambda item: (abs(len(item[2]) - len(wanted_compact)), len(item[2])))
+            return candidates[0][0], candidates[0][1]
+
+    # Return names to diagnostics when no match exists.
+    return None, ""
+
+def bh_bbox_of(element, view):
+    try:
+        box = element.get_BoundingBox(view)
+        if box:
+            return box
+    except:
+        pass
+    try:
+        return element.get_BoundingBox(None)
+    except:
+        return None
+
+
+def bh_opening_line_points(box, view_z):
+    # Trace the opening's actual XY extent using its longer horizontal bbox axis.
+    # This avoids using an unreliable family width parameter/default width.
+    dx = abs(box.Max.X - box.Min.X)
+    dy = abs(box.Max.Y - box.Min.Y)
+    cx = (box.Min.X + box.Max.X) * 0.5
+    cy = (box.Min.Y + box.Max.Y) * 0.5
+    if dx < 0.05 and dy < 0.05:
+        return None, None, 0.0, 0.0
+    if dx >= dy:
+        p1 = XYZ(box.Min.X, cy, view_z)
+        p2 = XYZ(box.Max.X, cy, view_z)
+        return p1, p2, dx, 0.0
+    p1 = XYZ(cx, box.Min.Y, view_z)
+    p2 = XYZ(cx, box.Max.Y, view_z)
+    return p1, p2, dy, math.pi / 2.0
+
+
+def bh_format_feet_inches(feet):
+    inches_total = int(round(max(0.0, feet) * 12.0))
+    feet_part = inches_total // 12
+    inch_part = inches_total % 12
+    return "{}'-{}\"".format(feet_part, inch_part)
+
+
+def bh_point_note(note):
+    try:
+        return note.Coord
+    except:
+        return None
+
+
+def bh_close_note(existing_notes, point, type_id, target_text, tol=0.20):
+    for note in existing_notes:
+        try:
+            if note.GetTypeId() != type_id:
+                continue
+            p = bh_point_note(note)
+            if p and math.sqrt((p.X-point.X)**2 + (p.Y-point.Y)**2) <= tol:
+                return note
+        except:
+            pass
+    return None
+
+
+def bh_line_exists(existing_curves, p1, p2, style_name, tol=0.05):
+    for curve_element in existing_curves:
+        try:
+            if not isinstance(curve_element, DetailCurve):
+                continue
+            line_style = curve_element.LineStyle
+            if not line_style or bh_norm(line_style.Name) != bh_norm(style_name):
+                continue
+            curve = curve_element.GeometryCurve
+            a = curve.GetEndPoint(0)
+            b = curve.GetEndPoint(1)
+            direct = (a.DistanceTo(p1) <= tol and b.DistanceTo(p2) <= tol)
+            reverse = (a.DistanceTo(p2) <= tol and b.DistanceTo(p1) <= tol)
+            if direct or reverse:
+                return True
+        except:
+            pass
+    return False
+
+
+def bh_get_selected_generic_models(uidoc, doc):
+    selected = []
+    try:
+        ids = list(uidoc.Selection.GetElementIds())
+    except:
+        ids = []
+    for eid in ids:
+        try:
+            element = doc.GetElement(eid)
+            if element and element.Category and element.Category.Id.IntegerValue == int(BuiltInCategory.OST_GenericModel):
+                selected.append(element)
+        except:
+            pass
+    return selected
+
+
+def bh_get_opening_center(instance, box, view_z):
+    # Prefer the family insertion point, not the bounding-box center.
+    try:
+        loc = instance.Location
+        if isinstance(loc, LocationPoint):
+            return XYZ(loc.Point.X, loc.Point.Y, view_z)
+        if isinstance(loc, LocationCurve):
+            p = loc.Curve.Evaluate(0.5, True)
+            return XYZ(p.X, p.Y, view_z)
+    except:
+        pass
+    return XYZ((box.Min.X + box.Max.X) * 0.5,
+               (box.Min.Y + box.Max.Y) * 0.5, view_z)
+
+
+def bh_get_opening_axis_and_width(instance, box):
+    # FamilyInstance.HandOrientation normally runs along the opening width.
+    try:
+        direction = instance.HandOrientation
+        dx, dy = direction.X, direction.Y
+        mag = math.sqrt(dx*dx + dy*dy)
+        if mag > 1e-8:
+            dx, dy = dx/mag, dy/mag
+        else:
+            dx, dy = 0.0, 0.0
+    except:
+        dx, dy = 0.0, 0.0
+
+    # Use the actual Width parameter first, which is preferable to the overall bbox.
+    width_ft = 0.0
+    for owner in (instance,):
+        for pname in ("Width", "Opening Width", "Rough Width"):
+            try:
+                par = owner.LookupParameter(pname)
+                if par and par.StorageType == StorageType.Double and par.AsDouble() > 0.1:
+                    width_ft = par.AsDouble()
+                    break
+            except:
+                pass
+        if width_ft > 0.1:
+            break
+
+    if width_ft <= 0.1 and box:
+        # Project the bbox extent along the family hand axis.
+        bbox_dx = abs(box.Max.X - box.Min.X)
+        bbox_dy = abs(box.Max.Y - box.Min.Y)
+        if abs(dx) + abs(dy) > 0.1:
+            width_ft = bbox_dx*abs(dx) + bbox_dy*abs(dy)
+
+    # Last fallback: use the longer horizontal bbox direction.
+    if abs(dx) + abs(dy) < 0.1:
+        bbox_dx = abs(box.Max.X - box.Min.X)
+        bbox_dy = abs(box.Max.Y - box.Min.Y)
+        if bbox_dx >= bbox_dy:
+            dx, dy = 1.0, 0.0
+            width_ft = width_ft if width_ft > 0.1 else bbox_dx
+        else:
+            dx, dy = 0.0, 1.0
+            width_ft = width_ft if width_ft > 0.1 else bbox_dy
+
+    return dx, dy, width_ft
+
+
+
+def bh_get_opening_height_ft(instance, box, level_elevation):
+    """Detect height above the active plan level using parameters then full model bbox."""
+    owners = [instance]
+    try:
+        typ = doc.GetElement(instance.GetTypeId())
+        if typ:
+            owners.append(typ)
+    except:
+        pass
+
+    # Prefer explicit height parameters, including project-specific names.
+    preferred_names = (
+        "Opening Height", "Rough Height", "Height", "Door Height",
+        "Clear Height", "Bulkhead Height", "Nominal Height",
+        "Overall Height", "Wall Opening Height", "Opening Ht"
+    )
+    for owner in owners:
+        for pname in preferred_names:
+            try:
+                par = owner.LookupParameter(pname)
+                if par and par.StorageType == StorageType.Double:
+                    val = par.AsDouble()
+                    if val > 0.1:
+                        return val, "parameter: " + pname
+            except:
+                pass
+
+    # Search all parameters for a height-like label; some families use custom names.
+    for owner in owners:
+        try:
+            for par in owner.Parameters:
+                try:
+                    pname = str(par.Definition.Name or "")
+                    if "height" in pname.lower() or "opening ht" in pname.lower():
+                        if par.StorageType == StorageType.Double:
+                            val = par.AsDouble()
+                            if val > 0.1:
+                                return val, "parameter: " + pname
+                except:
+                    pass
+        except:
+            pass
+
+    # The view-specific bbox can be clipped/projected. Use the full model bbox instead.
+    try:
+        full_box = instance.get_BoundingBox(None)
+        if full_box:
+            val = full_box.Max.Z - level_elevation
+            if val > 0.1:
+                return val, "full model bounding-box top minus active level"
+    except:
+        pass
+
+    # Last fallback: passed bbox only if it has a meaningful Z extent above level.
+    try:
+        val = box.Max.Z - level_elevation
+        if val > 0.1:
+            return val, "view bounding-box top minus active level"
+    except:
+        pass
+    return 0.0, "not detected"
+
+def bh_get_dimension_parameter(instance, type_element, names):
+    for owner in (instance, type_element):
+        if owner is None:
+            continue
+        for pname in names:
+            try:
+                par = owner.LookupParameter(pname)
+                if par and par.StorageType == StorageType.Double and par.AsDouble() > 0.05:
+                    return par.AsDouble(), pname
+            except:
+                pass
+        try:
+            wanted = [str(n).replace(" ", "").replace("_", "").lower() for n in names]
+            for par in owner.Parameters:
+                try:
+                    actual = str(par.Definition.Name or "").replace(" ", "").replace("_", "").lower()
+                    if actual in wanted and par.StorageType == StorageType.Double and par.AsDouble() > 0.05:
+                        return par.AsDouble(), str(par.Definition.Name)
+                except:
+                    pass
+        except:
+            pass
+    return 0.0, ""
+
+
+def bh_xy_key(pt, precision=4):
+    return (round(pt.X, precision), round(pt.Y, precision))
+
+
+def bh_cross2(o, a, b):
+    return (a[0]-o[0])*(b[1]-o[1]) - (a[1]-o[1])*(b[0]-o[0])
+
+
+def bh_convex_hull_xy(points):
+    """Monotonic-chain convex hull. Input/output are (x,y) tuples."""
+    pts = sorted(set(points))
+    if len(pts) <= 2:
+        return pts
+    lower = []
+    for p in pts:
+        while len(lower) >= 2 and bh_cross2(lower[-2], lower[-1], p) <= 1e-8:
+            lower.pop()
+        lower.append(p)
+    upper = []
+    for p in reversed(pts):
+        while len(upper) >= 2 and bh_cross2(upper[-2], upper[-1], p) <= 1e-8:
+            upper.pop()
+        upper.append(p)
+    return lower[:-1] + upper[:-1]
+
+
+def bh_collect_projected_points(geometry, points, depth=0):
+    """Collect actual family geometry points, including nested family instances."""
+    if geometry is None or depth > 8:
+        return
+    try:
+        for obj in geometry:
+            try:
+                if isinstance(obj, GeometryInstance):
+                    # Instance geometry is transformed into project coordinates.
+                    try:
+                        bh_collect_projected_points(obj.GetInstanceGeometry(), points, depth+1)
+                    except:
+                        try:
+                            bh_collect_projected_points(obj.GetSymbolGeometry(), points, depth+1)
+                        except:
+                            pass
+                    continue
+            except:
+                pass
+
+            try:
+                if isinstance(obj, Solid):
+                    try:
+                        for edge in obj.Edges:
+                            try:
+                                curve = edge.AsCurve()
+                                for p in curve.Tessellate():
+                                    points.append((float(p.X), float(p.Y)))
+                            except:
+                                pass
+                    except:
+                        pass
+                    continue
+            except:
+                pass
+
+            try:
+                if isinstance(obj, Curve):
+                    for p in obj.Tessellate():
+                        points.append((float(p.X), float(p.Y)))
+                    continue
+            except:
+                pass
+    except:
+        pass
+
+
+def bh_normalize_text_angle(angle):
+    """Normalize text rotation to Revit's readable half-turn range."""
+    while angle > math.pi * 0.5:
+        angle -= math.pi
+    while angle <= -math.pi * 0.5:
+        angle += math.pi
+    return angle
+
+def bh_host_wall_angle(instance):
+    """Return the XY direction of the host wall, if the opening is wall-hosted."""
+    try:
+        host = instance.Host
+        if host:
+            location = host.Location
+            if isinstance(location, LocationCurve):
+                curve = location.Curve
+                p0 = curve.GetEndPoint(0)
+                p1 = curve.GetEndPoint(1)
+                dx, dy = p1.X - p0.X, p1.Y - p0.Y
+                if math.sqrt(dx * dx + dy * dy) > 1e-8:
+                    return bh_normalize_text_angle(math.atan2(dy, dx))
+    except Exception:
+        pass
+    return None
+
+def bh_center_from_outline_segments(segments, angle, view_z):
+    """Find the true centre between BOTH sides of the outline created for the opening."""
+    points = []
+    for a, b in segments:
+        points.append((a.X, a.Y))
+        points.append((b.X, b.Y))
+    if not points:
+        return None
+    ux, uy = math.cos(angle), math.sin(angle)
+    vx, vy = -uy, ux
+    along = [x * ux + y * uy for x, y in points]
+    across = [x * vx + y * vy for x, y in points]
+    mid_along = (min(along) + max(along)) * 0.5
+    mid_across = (min(across) + max(across)) * 0.5
+    return XYZ(mid_along * ux + mid_across * vx,
+               mid_along * uy + mid_across * vy, view_z)
+
+
+def bh_center_note_visual_bbox(note, target_center, target_view):
+    """After rotation, shift the visible text-note bounding-box centre onto target centre."""
+    try:
+        doc.Regenerate()
+        bbox = note.get_BoundingBox(target_view)
+        if bbox is None:
+            return False
+        bx = (bbox.Min.X + bbox.Max.X) * 0.5
+        by = (bbox.Min.Y + bbox.Max.Y) * 0.5
+        bz = (bbox.Min.Z + bbox.Max.Z) * 0.5
+        delta = XYZ(target_center.X - bx, target_center.Y - by, target_center.Z - bz)
+        if delta.GetLength() > 1e-5:
+            ElementTransformUtils.MoveElement(doc, note.Id, delta)
+        return True
+    except Exception as ex:
+        add_warning("Could not centre visible bulkhead text in outline: {}".format(ex))
+        return False
+
+
+def bh_collect_exact_plan_curves(geometry, out_segments, view_z, outer_transform=None, depth=0):
+    """Collect curve objects exposed for the active plan view, not a hull of all geometry.
+
+    The important difference is that we preserve each family line separately. We do not
+    combine every point into a convex hull, because a hull includes construction/extension
+    lines and can create an oversized offset rectangle around this opening family.
+    """
+    if geometry is None or depth > 10:
+        return
+    try:
+        for obj in geometry:
+            try:
+                if isinstance(obj, GeometryInstance):
+                    child = None
+                    try:
+                        # InstanceGeometry applies this nested instance's transform.
+                        child = obj.GetInstanceGeometry()
+                    except:
+                        try:
+                            child = obj.GetSymbolGeometry()
+                        except:
+                            child = None
+                    if child is not None:
+                        bh_collect_exact_plan_curves(child, out_segments, view_z,
+                                                     outer_transform, depth + 1)
+                    continue
+            except:
+                pass
+
+            coords = None
+            try:
+                if isinstance(obj, Curve):
+                    coords = list(obj.Tessellate())
+            except:
+                coords = None
+            if coords is None:
+                try:
+                    if isinstance(obj, PolyLine):
+                        coords = list(obj.GetCoordinates())
+                except:
+                    coords = None
+            if not coords or len(coords) < 2:
+                # Deliberately do not harvest Solid.Edges here. Those are 3D physical
+                # edges, not necessarily the symbolic plan outline visible for this family.
+                continue
+
+            projected = []
+            for pt in coords:
+                try:
+                    p = outer_transform.OfPoint(pt) if outer_transform is not None else pt
+                    xy = (float(p.X), float(p.Y))
+                    if not projected or math.sqrt((xy[0]-projected[-1][0])**2 +
+                                                  (xy[1]-projected[-1][1])**2) > 1e-5:
+                        projected.append(xy)
+                except:
+                    pass
+
+            for i in range(len(projected)-1):
+                x1, y1 = projected[i]
+                x2, y2 = projected[i+1]
+                length_xy = math.sqrt((x2-x1)**2 + (y2-y1)**2)
+                if length_xy < 0.05:
+                    continue
+                a = XYZ(x1, y1, view_z)
+                b = XYZ(x2, y2, view_z)
+                # De-duplicate coincident segments independent of direction.
+                k1 = (round(x1, 5), round(y1, 5))
+                k2 = (round(x2, 5), round(y2, 5))
+                key = (k1, k2) if k1 <= k2 else (k2, k1)
+                already = False
+                for old_a, old_b, old_key in out_segments:
+                    if old_key == key:
+                        already = True
+                        break
+                if not already:
+                    out_segments.append((a, b, key))
+    except:
+        pass
+
+
+def bh_exact_family_plan_segments(instance, view, view_z):
+    """Get the family curves as presented in the active plan view, transformed per instance."""
+    raw = []
+    options = Options()
+    options.ComputeReferences = False
+    options.IncludeNonVisibleObjects = False
+    try:
+        options.View = view
+    except:
+        pass
+
+    # First choice: view-context geometry of the placed instance. Revit returns transformed
+    # geometry for the instance, allowing each curve to land on the same XY as the family.
+    try:
+        geometry = instance.get_Geometry(options)
+        bh_collect_exact_plan_curves(geometry, raw, view_z, None, 0)
+    except:
+        raw = []
+
+    # Family symbolic curves are not exposed through the placed instance on some Revit builds.
+    # In that case, read the type geometry and apply the instance transform exactly once.
+    if len(raw) < 2:
+        raw = []
+        try:
+            symbol = doc.GetElement(instance.GetTypeId())
+            symbol_geometry = symbol.get_Geometry(options) if symbol else None
+            transform = instance.GetTransform()
+            bh_collect_exact_plan_curves(symbol_geometry, raw, view_z, transform, 0)
+        except:
+            raw = []
+
+    return [(item[0], item[1]) for item in raw]
+
+
+def bh_rectangle_segments(instance, box, view_z):
+    """Prefer exact view-visible family curves; use a transform-based rectangle only if absent.
+
+    Visible plan curves are copied segment-for-segment. No convex hull is applied: the hull was
+    the source of the oversized blue rectangle/offset geometry in rotated opening instances.
+    """
+    exact_segments = bh_exact_family_plan_segments(instance, view, view_z)
+    if len(exact_segments) >= 2:
+        longest = max(exact_segments, key=lambda s: s[0].DistanceTo(s[1]))
+        dx = longest[1].X - longest[0].X
+        dy = longest[1].Y - longest[0].Y
+        angle = math.atan2(dy, dx)
+        angle = bh_normalize_text_angle(angle)
+        center = bh_center_from_outline_segments(exact_segments, angle, view_z)
+        if center is None:
+            center = bh_get_opening_center(instance, box, view_z)
+        return exact_segments, "active-view family curves (exact segments: {})".format(len(exact_segments)), center, angle
+
+    # Safe fallback: dimensions oriented by the placed instance transform, with the insertion
+    # point as the center. Do not use the world-axis bbox center; that shifts rotated families.
+    type_element = None
+    try:
+        type_element = doc.GetElement(instance.GetTypeId())
+    except:
+        pass
+    width, width_name = bh_get_dimension_parameter(instance, type_element,
+        ("Width_x", "Width X", "Opening Width", "Rough Width", "Width", "Nominal Width", "Overall Width"))
+    depth, depth_name = bh_get_dimension_parameter(instance, type_element,
+        ("DEPTH", "Depth", "Opening Depth", "Thickness", "Rough Depth", "Overall Depth"))
+    center = bh_get_opening_center(instance, box, view_z)
+    try:
+        transform = instance.GetTransform()
+        bx = XYZ(transform.BasisX.X, transform.BasisX.Y, 0.0)
+        by = XYZ(transform.BasisY.X, transform.BasisY.Y, 0.0)
+        if bx.GetLength() > 1e-6:
+            bx = bx.Normalize()
+        if by.GetLength() > 1e-6:
+            by = by.Normalize()
+    except:
+        bx, by = XYZ(1, 0, 0), XYZ(0, 1, 0)
+
+    if width <= 0.05:
+        # Infer width along transformed X from the projected world bbox corners.
+        width = abs(box.Max.X-box.Min.X) * abs(bx.X) + abs(box.Max.Y-box.Min.Y) * abs(bx.Y)
+        if width <= 0.05:
+            width = max(abs(box.Max.X-box.Min.X), abs(box.Max.Y-box.Min.Y))
+        width_name = "transform-projected bbox width"
+    if depth <= 0.05:
+        depth = abs(box.Max.X-box.Min.X) * abs(by.X) + abs(box.Max.Y-box.Min.Y) * abs(by.Y)
+        if depth <= 0.05:
+            depth = min(abs(box.Max.X-box.Min.X), abs(box.Max.Y-box.Min.Y))
+        if depth <= 0.05:
+            depth = 0.5
+        depth_name = "transform-projected bbox depth"
+
+    p0 = center - bx*(width*0.5) - by*(depth*0.5)
+    p1 = center + bx*(width*0.5) - by*(depth*0.5)
+    p2 = center + bx*(width*0.5) + by*(depth*0.5)
+    p3 = center - bx*(width*0.5) + by*(depth*0.5)
+    angle = bh_normalize_text_angle(math.atan2(bx.Y, bx.X))
+    segments = [(XYZ(p0.X,p0.Y,view_z), XYZ(p1.X,p1.Y,view_z)),
+                (XYZ(p1.X,p1.Y,view_z), XYZ(p2.X,p2.Y,view_z)),
+                (XYZ(p2.X,p2.Y,view_z), XYZ(p3.X,p3.Y,view_z)),
+                (XYZ(p3.X,p3.Y,view_z), XYZ(p0.X,p0.Y,view_z))]
+    source = "transform/dimension fallback; {}={:.3f}ft, {}={:.3f}ft".format(
+        width_name, width, depth_name, depth)
+    return segments, source, center, angle
+
+# -----------------------------------------------------------------------------
+# SMART UI — WD OPENING TAGGER
+# -----------------------------------------------------------------------------
+def get_ui_type_lists():
+    text_type_map = {}
+    room_tag_map = {}
+    line_style_map = {"<No line style>": None}
+
+    text_types = get_all_text_note_types()
+    for element in text_types:
+        try:
+            label = get_element_name(element) or "Text Note Type"
+            if label in text_type_map:
+                label = "{} [Id {}]".format(label, element.Id.IntegerValue)
+            text_type_map[label] = element
+        except Exception:
+            pass
+
+    try:
+        room_types = list(FilteredElementCollector(doc).OfCategory(
+            BuiltInCategory.OST_RoomTags).WhereElementIsElementType().ToElements())
+    except Exception:
+        room_types = []
+
+    for element in room_types:
+        try:
+            family_name = str(element.Family.Name)
+        except Exception:
+            family_name = "Room Tag"
+        type_name = get_element_name(element)
+        label = "{} : {}".format(family_name, type_name) if family_name else type_name
+        if label in room_tag_map:
+            label = "{} [Id {}]".format(label, element.Id.IntegerValue)
+        room_tag_map[label] = element
+
+    try:
+        line_category = doc.Settings.Categories.get_Item(BuiltInCategory.OST_Lines)
+        for subcategory in line_category.SubCategories:
+            try:
+                graphics = subcategory.GetGraphicsStyle(GraphicsStyleType.Projection)
+                if graphics:
+                    label = str(subcategory.Name)
+                    if label not in line_style_map:
+                        line_style_map[label] = graphics
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    return text_type_map, room_tag_map, line_style_map
+
+
+def show_smart_ui():
+    """Reference-style presentation only; the annotation/settings contract is unchanged."""
+    from System.Drawing import (Color, RectangleF, PointF, SolidBrush, Pen,
+                                GraphicsUnit, StringFormat, StringAlignment)
+    from System.Drawing.Drawing2D import (GraphicsPath, SmoothingMode, DashStyle,
+                                         LinearGradientBrush, LinearGradientMode)
+    from System.Windows.Forms import (Screen, AutoScaleMode, Cursors, ToolTip,
+                                      PaintEventHandler, DrawMode, DrawItemEventHandler,
+                                      DrawItemState)
+
+    text_type_map, room_tag_map, line_style_map = get_ui_type_lists()
+    C_RED = Color.FromArgb(255, 21, 42)
+    C_RED_DARK = Color.FromArgb(212, 0, 23)
+    C_BLUSH = Color.FromArgb(255, 237, 240)
+    C_INK = Color.FromArgb(12, 27, 51)
+    C_MUTED = Color.FromArgb(109, 126, 151)
+    C_LINE = Color.FromArgb(222, 229, 238)
+    C_SURFACE = Color.FromArgb(251, 253, 255)
+    C_WHITE = Color.White
+    LOGICAL_W, LOGICAL_H = 1600.0, 860.0
+    area = Screen.PrimaryScreen.WorkingArea
+    scale = min(1.0, (area.Width - 64.0) / LOGICAL_W,
+                (area.Height - 88.0) / LOGICAL_H)
+    scale = max(0.35, scale)
+
+    def px(value):
+        return max(1, int(round(value * scale)))
+
+    def bounds(control, x, y, w, h):
+        control.Location = Point(int(round(x * scale)), int(round(y * scale)))
+        control.Size = Size(px(w), px(h))
+
+    def round_path(x, y, w, h, radius=12):
+        path = GraphicsPath()
+        d = float(radius * 2)
+        path.AddArc(float(x), float(y), d, d, 180.0, 90.0)
+        path.AddArc(float(x + w - d), float(y), d, d, 270.0, 90.0)
+        path.AddArc(float(x + w - d), float(y + h - d), d, d, 0.0, 90.0)
+        path.AddArc(float(x), float(y + h - d), d, d, 90.0, 90.0)
+        path.CloseFigure()
+        return path
+
+    # Paint at a fixed design size and scale once, keeping all cards and fields aligned.
+    class DesignSurface(Panel):
+        def __init__(self):
+            Panel.__init__(self)
+            self.DoubleBuffered = True
+            self.ResizeRedraw = True
+
+    class DesignButton(Button):
+        def __init__(self, kind, title, body, icon):
+            Button.__init__(self)
+            self.kind, self.title, self.body, self.icon = kind, title, body, icon
+            self.hot = False
+            self.FlatStyle = System.Windows.Forms.FlatStyle.Flat
+            self.FlatAppearance.BorderSize = 0
+            self.BackColor = C_SURFACE
+            self.Cursor = Cursors.Hand
+            self.UseVisualStyleBackColor = False
+            self.AccessibleName = title
+            self.AccessibleDescription = body
+            self.Text = title
+            self.DoubleBuffered = True
+
+        def OnMouseEnter(self, event):
+            self.hot = True
+            self.Invalidate()
+            Button.OnMouseEnter(self, event)
+
+        def OnMouseLeave(self, event):
+            self.hot = False
+            self.Invalidate()
+            Button.OnMouseLeave(self, event)
+
+        def OnPaint(self, event):
+            g = event.Graphics
+            state = g.Save()
+            resources = []
+            try:
+                g.SmoothingMode = SmoothingMode.AntiAlias
+                g.ScaleTransform(float(scale), float(scale))
+                w, h = self.ClientSize.Width / scale, self.ClientSize.Height / scale
+                draw = Painter(g, resources)
+                if self.kind == 'run':
+                    draw.round(0, 0, w - 1, h - 1, 10,
+                               C_RED_DARK if self.hot else C_RED)
+                    cx = w * 0.5
+                    draw.polygon([(cx - 34, 15), (cx - 34, 35), (cx - 16, 25)], C_WHITE)
+                    draw.text('Run', cx + 6, 8, 80, 35, 27, C_WHITE, True)
+                else:
+                    draw.round(0, 0, w - 1, h - 1, 12,
+                               C_BLUSH if self.hot else Color.FromArgb(255, 248, 249),
+                               Color.FromArgb(255, 224, 229))
+                    draw.ellipse(28, 11, 76, 76, Color.FromArgb(255, 231, 234))
+                    draw.icon(self.icon, 66, 49, 1.18)
+                    draw.text(self.title, 132, 13, w - 170, 28, 20, C_RED_DARK, True)
+                    draw.text(self.body, 132, 44, w - 180, 46, 16, C_MUTED)
+                    draw.line(w - 38, 43, w - 31, 50, C_RED, 2)
+                    draw.line(w - 31, 50, w - 38, 57, C_RED, 2)
+                if self.Focused and self.ShowFocusCues:
+                    draw.round(4, 4, w - 9, h - 9, 8, None, C_INK)
+            finally:
+                for resource in reversed(resources):
+                    resource.Dispose()
+                g.Restore(state)
+
+    class Painter(object):
+        def __init__(self, graphics, resources):
+            self.g, self.resources = graphics, resources
+
+        def keep(self, resource):
+            self.resources.append(resource)
+            return resource
+
+        def brush(self, color):
+            return self.keep(SolidBrush(color))
+
+        def pen(self, color, width=1.0, dashed=False):
+            pen = self.keep(Pen(color, float(width)))
+            if dashed:
+                pen.DashStyle = DashStyle.Dash
+            return pen
+
+        def line(self, x1, y1, x2, y2, color, width=1.0, dashed=False):
+            self.g.DrawLine(self.pen(color, width, dashed),
+                            float(x1), float(y1), float(x2), float(y2))
+
+        def rect(self, x, y, w, h, color=None, border=None, width=1):
+            if color is not None:
+                self.g.FillRectangle(self.brush(color), float(x), float(y), float(w), float(h))
+            if border is not None:
+                self.g.DrawRectangle(self.pen(border, width), float(x), float(y), float(w), float(h))
+
+        def round(self, x, y, w, h, radius, color=None, border=None):
+            path = self.keep(round_path(x, y, w, h, radius))
+            if color is not None:
+                self.g.FillPath(self.brush(color), path)
+            if border is not None:
+                self.g.DrawPath(self.pen(border), path)
+
+        def ellipse(self, x, y, w, h, color=None, border=None, width=1):
+            if color is not None:
+                self.g.FillEllipse(self.brush(color), float(x), float(y), float(w), float(h))
+            if border is not None:
+                self.g.DrawEllipse(self.pen(border, width), float(x), float(y), float(w), float(h))
+
+        def polygon(self, points, color):
+            self.g.FillPolygon(self.brush(color),
+                               System.Array[PointF]([PointF(float(x), float(y)) for x, y in points]))
+
+        def text(self, text, x, y, w, h, size=18, color=None, bold=False, center=False):
+            font = self.keep(Font('Segoe UI', float(size),
+                                  FontStyle.Bold if bold else FontStyle.Regular, GraphicsUnit.Pixel))
+            fmt = self.keep(StringFormat())
+            fmt.Alignment = StringAlignment.Center if center else StringAlignment.Near
+            fmt.LineAlignment = StringAlignment.Near
+            self.g.DrawString(text, font, self.brush(color or C_INK),
+                              RectangleF(float(x), float(y), float(w), float(h)), fmt)
+
+        def arc(self, x, y, w, h, start, sweep, color, width=1):
+            self.g.DrawArc(self.pen(color, width), float(x), float(y), float(w), float(h),
+                           float(start), float(sweep))
+
+        def icon(self, kind, cx, cy, factor=1):
+            state = self.g.Save()
+            self.g.TranslateTransform(float(cx), float(cy))
+            self.g.ScaleTransform(float(factor), float(factor))
+            red = C_RED_DARK
+            if kind == 'door':
+                self.round(-7, -12, 14, 24, 1, None, red)
+                self.ellipse(2, -1, 2, 2, red)
+            elif kind == 'format':
+                self.text('Aa', -17, -17, 40, 38, 24, red, True)
+            elif kind == 'text':
+                self.text('T', -12, -22, 34, 44, 34, red, True)
+            elif kind == 'line':
+                self.line(-15, 0, 15, 0, red, 2.5, True)
+            elif kind == 'rotation':
+                self.arc(-10, -10, 20, 20, 140, 300, red, 2)
+                self.line(-10, 4, -11, 11, red, 2)
+                self.line(-11, 11, -3, 9, red, 2)
+            elif kind == 'layers':
+                for y in (-6, 0, 6):
+                    for a, b in [((-10, y), (0, y-6)), ((0, y-6), (10, y)),
+                                 ((10, y), (0, y+6)), ((0, y+6), (-10, y))]:
+                        self.line(a[0], a[1], b[0], b[1], red, 1.8)
+            elif kind == 'play':
+                self.ellipse(-15, -15, 30, 30, C_WHITE, red, 2.5)
+                self.polygon([(-4, -8), (-4, 8), (8, 0)], C_RED)
+            elif kind == 'guide':
+                self.round(-12, -17, 24, 34, 2, None, red)
+                self.line(2, -17, 12, -7, red, 2)
+                self.line(2, -17, 2, -7, red, 2)
+                self.line(2, -7, 12, -7, red, 2)
+                for y, end in [(-2, 6), (4, 6), (10, 2)]:
+                    self.line(-6, y, end, y, red, 2)
+            elif kind == 'bulb':
+                self.arc(-12, -16, 24, 25, 145, 250, red, 2.5)
+                self.line(-10, 4, -5, 13, red, 2.5)
+                self.line(10, 4, 5, 13, red, 2.5)
+                self.line(-5, 13, 5, 13, red, 2.5)
+                self.arc(-5, 11, 10, 10, 0, 180, red, 2.5)
+            elif kind == 'people':
+                for x, y, r in [(0, -8, 6), (-11, -5, 4), (11, -5, 4)]:
+                    self.ellipse(x-r, y-r, r*2, r*2, C_RED)
+                self.arc(-13, 0, 26, 26, 180, 180, C_RED, 7)
+                self.arc(-22, 2, 18, 19, 180, 105, C_RED, 4)
+                self.arc(4, 2, 18, 19, 255, 105, C_RED, 4)
+            elif kind == 'person':
+                self.ellipse(-6, -15, 12, 12, C_RED)
+                self.arc(-11, 3, 22, 21, 180, 180, C_RED, 7)
+            self.g.Restore(state)
+
+    form = Form()
+    form.Text = 'WD | Opening Tagger'
+    form.StartPosition = FormStartPosition.CenterScreen
+    form.FormBorderStyle = FormBorderStyle.FixedDialog
+    form.MaximizeBox = False
+    form.MinimizeBox = False
+    form.AutoScaleMode = getattr(AutoScaleMode, "None")
+    form.ClientSize = Size(px(LOGICAL_W), px(LOGICAL_H))
+    form.BackColor = C_SURFACE
+    ui_font = Font('Segoe UI', float(17 * scale), FontStyle.Regular, GraphicsUnit.Pixel)
+    form.Font = ui_font
+    form.ForeColor = C_INK
+    surface = DesignSurface()
+    surface.Dock = DockStyle.Fill
+    surface.BackColor = C_SURFACE
+    form.Controls.Add(surface)
+    tips = ToolTip()
+    tips.AutoPopDelay = 12000
+    form.Disposed += EventHandler(lambda sender, event: tips.Dispose())
+
+    logo_bytes = System.Convert.FromBase64String("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")
+    logo_stream = System.IO.MemoryStream(logo_bytes)
+    logo_image = System.Drawing.Image.FromStream(logo_stream)
+
+    def paint_plan(draw):
+        g = draw.g
+        state = g.Save()
+        g.TranslateTransform(670.0, 144.0)
+        g.SetClip(RectangleF(0, 0, 896, 504))
+        light = Color.FromArgb(181, 186, 192)
+        ink = Color.FromArgb(78, 80, 84)
+        fill = Color.FromArgb(230, 230, 230)
+        draw.rect(0, 0, 896, 504, C_WHITE)
+        # Wall poche, partitions, door leaves and swings are vector illustration only.
+        walls = [(64, 0, 26, 119), (64, 119, 292, 26), (330, 0, 26, 119),
+                 (445, 0, 38, 105), (445, 105, 104, 55), (530, 0, 18, 105),
+                 (64, 145, 26, 359), (64, 282, 83, 26), (254, 282, 329, 26),
+                 (690, 282, 171, 26), (841, 160, 20, 344), (446, 308, 16, 196),
+                 (690, 132, 171, 28)]
+        for x, y, w, h in walls:
+            draw.rect(x, y, w, h, fill, ink, 1.1)
+            draw.rect(x+4, y+3, max(1,w-8), max(1,h-6), None, light, 0.7)
+            # Restrained concrete texture, deterministic and dependency free.
+            for tx in range(int(x+7), int(x+w-4), 13):
+                for ty in range(int(y+6), int(y+h-3), 11):
+                    draw.line(tx, ty, tx+1, ty+1, light, 0.6)
+        for x in (23, 48):
+            draw.line(x, 0, x, 504, light, 0.7)
+        for y in range(20, 500, 23):
+            draw.line(0, y, 63, y, light, 0.7)
+        for x in (142, 158, 237, 255, 296):
+            draw.line(x, 0, x, 119, light, 0.9)
+        draw.rect(175, 54, 42, 58, None, light)
+        draw.ellipse(193, 78, 8, 8, None, light)
+        draw.line(90, 160, 445, 160, light)
+        draw.line(548, 160, 690, 160, ink)
+        draw.line(720, 0, 720, 131, light)
+        draw.line(750, 0, 750, 131, light)
+        draw.line(780, 0, 780, 131, light)
+        draw.rect(498, 4, 39, 64, None, ink)
+        # Door swings, matching the two marked openings.
+        for x in (147, 583):
+            draw.line(x+7, 307, x+7, 396, ink, 1.2)
+            draw.line(x+12, 307, x+12, 392, light)
+            draw.arc(x-82, 218, 190, 178, 0, 90, ink, 1.1)
+        draw.line(620, 132, 620, 67, ink)
+        draw.arc(555, 67, 130, 130, 270, 90, ink)
+        draw.line(620, 132, 690, 132, light)
+        # Dining table, chairs, casework, sink and plan dimension strings.
+        draw.rect(255, 431, 150, 62, None, light)
+        for x in (273, 330):
+            draw.rect(x, 412, 44, 17, None, light)
+            draw.line(x, 417, x+44, 417, light)
+            draw.rect(x, 495, 44, 17, None, light)
+        draw.rect(237, 443, 16, 37, None, light)
+        draw.rect(408, 443, 16, 37, None, light)
+        draw.rect(757, 329, 61, 175, None, light)
+        draw.rect(768, 339, 39, 58, None, light)
+        draw.rect(776, 347, 23, 40, None, light)
+        draw.ellipse(800, 366, 7, 7, None, light)
+        draw.rect(470, 432, 58, 72, None, light)
+        for x in (143, 297, 446):
+            draw.line(x, 0, x, 504, Color.FromArgb(219, 222, 227), 0.7)
+            for y in (100, 267, 460):
+                draw.line(x-2, y-2, x+2, y+2, light, 0.8)
+        # Reference-only labels. Actual annotation placement remains unchanged below.
+        for x in (147, 583):
+            draw.rect(x, 280, 107, 22, C_WHITE)
+            g.DrawRectangle(draw.pen(C_RED, 2, True), float(x), 280.0, 107.0, 22.0)
+            draw.line(x, 280, x, 310, C_RED, 1.7)
+            draw.line(x+107, 280, x+107, 310, C_RED, 1.7)
+            draw.line(x+18, 278, x+29, 257, C_RED, 1.8)
+            draw.polygon([(x+18,278), (x+18,269), (x+24,272)], C_RED)
+            label_state = g.Save()
+            g.TranslateTransform(float(x+29), 257.0)
+            g.RotateTransform(-16.0)
+            draw.line(0, 0, 222, 0, C_RED, 1.5)
+            draw.text("BULKHEAD @ 9'-0\" A.F.F.", 0, -28, 242, 30, 19, C_RED, True)
+            g.Restore(label_state)
+        g.Restore(state)
+
+    row_info = [('door', 'Opening Family'), ('format', 'Label Format'),
+                ('text', 'Text Style'), ('line', 'Line Style'),
+                ('rotation', 'Text Rotation'), ('layers', 'Workset Selection')]
+
+    def paint_surface(sender, event):
+        g = event.Graphics
+        state = g.Save()
+        resources = []
+        try:
+            g.SmoothingMode = SmoothingMode.AntiAlias
+            g.Clear(C_SURFACE)
+            g.ScaleTransform(float(scale), float(scale))
+            draw = Painter(g, resources)
+            # Soft architectural wireframe in the header, behind the brand/title.
+            wire = Color.FromArgb(48, 255, 21, 42)
+            for i in range(9):
+                x = 1030 + i * 48
+                draw.line(x, 0, x, 130, wire, 0.7)
+                draw.line(x+7, 0, x+7, 130, wire, 0.7)
+                draw.line(x-95, 120, x+150, 0, wire, 0.7)
+                draw.line(x-88, 120, x+157, 0, wire, 0.7)
+                draw.line(900, 50+i*7, 1595, i*17, wire, 0.6)
+            g.DrawImage(logo_image, RectangleF(38, 28, 326, 85))
+            draw.line(382, 30, 382, 104, Color.FromArgb(201, 211, 225))
+            draw.text('Opening Tagger', 424, 28, 500, 52, 38, C_INK, True)
+            draw.text('B U L K H E A D   W A L L   O P E N I N G', 427, 83, 570, 30, 16, C_MUTED, True)
+            # White rounded cards with a faint shadow and thin cool border.
+            for x, w in ((28, 620), (662, 912)):
+                draw.round(x, 137, w, 526, 14, Color.FromArgb(241, 245, 250))
+                draw.round(x, 134, w, 526, 14, C_WHITE, Color.FromArgb(231, 237, 244))
+            draw.text('O P E N I N G  T A G G E R', 52, 151, 560, 37, 25, C_INK, True)
+            draw.text('B U L K H E A D   W A L L   O P E N I N G', 53, 186, 570, 28, 16, C_MUTED)
+            draw.text('Create overhead bulkhead outlines and height notes for wall openings.',
+                      53, 219, 560, 35, 16, C_MUTED)
+            for index, (icon, label) in enumerate(row_info):
+                y = 257 + index * 56
+                draw.round(47, y, 50, 47, 10, C_BLUSH)
+                draw.icon(icon, 72, y+24)
+                draw.text(label, 116, y+13, 178, 30, 17, C_INK)
+                draw.round(294, y+6, 334, 40, 7, C_WHITE, Color.FromArgb(206, 217, 232))
+            paint_plan(draw)
+            draw.round(670, 144, 896, 504, 10, None, Color.FromArgb(231, 237, 244))
+            draw.round(1380, 152, 178, 32, 10, C_RED)
+            draw.text('F A M I L Y  O V E R L A Y', 1383, 160, 172, 22, 11, C_WHITE, True, True)
+            draw.line(28, 787, 1572, 787, C_LINE)
+            # Reference credits and support strip.
+            draw.icon('person', 68, 820)
+            draw.text('Developed by', 109, 799, 210, 23, 14, C_MUTED)
+            draw.text('Pranay Parkar', 109, 821, 210, 25, 17, C_INK, True)
+            draw.line(335, 804, 335, 840, Color.FromArgb(210, 220, 234))
+            draw.icon('people', 435, 820)
+            draw.text('Support', 477, 799, 400, 23, 14, C_MUTED)
+            draw.text('Akshay Rawat  |  Harshada Hikare', 477, 821, 410, 25, 17, C_INK, True)
+            draw.line(905, 804, 905, 840, Color.FromArgb(210, 220, 234))
+            draw.icon('people', 1004, 820)
+            draw.text('BIM Automation Specialists', 1042, 799, 510, 23, 14, C_MUTED)
+            draw.text('Joshua Hosteler  |  Raleigh Smith  |  Suraj Kumar  |  Utkarsh Guar',
+                      1042, 822, 525, 25, 15, C_INK, True)
+        finally:
+            for resource in reversed(resources):
+                resource.Dispose()
+            g.Restore(state)
+
+    surface.Paint += PaintEventHandler(paint_surface)
+    controls = {}
+
+    def place_field(control, index, key):
+        # Insets leave the painted rounded field border visible.
+        control.Font = ui_font
+        control.ForeColor = C_INK
+        control.BackColor = C_WHITE
+        control.TabIndex = index
+        control.AccessibleName = row_info[index][1]
+        y = 257 + index * 56
+        bounds(control, 304, y+13, 313, 28)
+        if isinstance(control, ComboBox):
+            control.FlatStyle = System.Windows.Forms.FlatStyle.Flat
+            control.IntegralHeight = False
+            control.DropDownHeight = px(260)
+            control.DrawMode = DrawMode.OwnerDrawFixed
+            control.ItemHeight = px(24)
+            def draw_item(sender, event):
+                if event.Index < 0:
+                    return
+                event.DrawBackground()
+                selected = (event.State & DrawItemState.Selected) == DrawItemState.Selected
+                brush = SolidBrush(C_WHITE if selected else C_INK)
+                try:
+                    event.Graphics.DrawString(str(sender.Items[event.Index]), ui_font, brush,
+                                              float(event.Bounds.X+2), float(event.Bounds.Y+px(2)))
+                finally:
+                    brush.Dispose()
+                event.DrawFocusRectangle()
+            control.DrawItem += DrawItemEventHandler(draw_item)
+        surface.Controls.Add(control)
+        controls[key] = control
+        return control
+
+    family_combo = ComboBox()
+    family_combo.DropDownStyle = ComboBoxStyle.DropDown
+    family_combo.Items.Add('DOOR - Opening Wall')
+    family_combo.Text = opening_filter or 'DOOR - Opening Wall'
+    place_field(family_combo, 0, 'opening_filter')
+
+    # Editable dropdown preserves arbitrary existing templates while matching the reference.
+    opening_text_box = ComboBox()
+    opening_text_box.DropDownStyle = ComboBoxStyle.DropDown
+    opening_text_box.Items.Add('BULKHEAD @ {height} A.F.F.')
+    opening_text_box.Text = opening_text_template or 'BULKHEAD @ {height} A.F.F.'
+    place_field(opening_text_box, 1, 'opening_text')
+    tips.SetToolTip(opening_text_box, 'Edit the wording freely. {height} inserts the detected A.F.F. height.')
+
+    def make_combo(items, selected_label=None, include_default=None):
+        combo = ComboBox()
+        combo.DropDownStyle = ComboBoxStyle.DropDownList
+        combo.Font = Font("Segoe UI", 9.5, FontStyle.Regular)
+        combo.BackColor = C_WHITE
+        combo.ForeColor = C_INK
+        labels = []
+        if include_default is not None:
+            labels.append(include_default)
+        labels.extend(sorted([value for value in items.keys() if value != include_default],
+                             key=lambda value: value.lower()))
+        if not labels:
+            labels = ["<None available>"]
+        for label in labels:
+            combo.Items.Add(label)
+
+        preferred = None
+        if selected_label:
+            selected_norm = norm(selected_label)
+            for label in labels:
+                if norm(label) == selected_norm:
+                    preferred = label
+                    break
+            if preferred is None:
+                compact_target = re.sub(r"[\s_\-]+", "", selected_norm)
+                for label in labels:
+                    compact_label = re.sub(r"[\s_\-]+", "", norm(label))
+                    if compact_label == compact_target:
+                        preferred = label
+                        break
+            if preferred is None:
+                for label in labels:
+                    if not label.startswith("<") and selected_norm in norm(label):
+                        preferred = label
+                        break
+        if preferred is None:
+            preferred = labels[0]
+        try:
+            combo.SelectedIndex = labels.index(preferred)
+        except Exception:
+            combo.SelectedIndex = 0
+        return combo
+    open_text_combo = make_combo(text_type_map, opening_text_type_name or 'SHELL_NONPRINT_3/256"',
+                                 '<Skip text note>')
+    place_field(open_text_combo, 2, 'opening_text_type_label')
+    line_combo = make_combo(line_style_map, opening_line_style_name or 'SHELL_OVERHEAD', '<No line style>')
+    place_field(line_combo, 3, 'opening_line_style_label')
+    orientation_combo = ComboBox()
+    orientation_combo.DropDownStyle = ComboBoxStyle.DropDownList
+    for label in ('Auto (Follow Opening)', u'Horizontal (0\u00b0)', u'Vertical (90\u00b0)'):
+        orientation_combo.Items.Add(label)
+    orientation_combo.SelectedIndex = 0
+    place_field(orientation_combo, 4, 'opening_orientation')
+    workset_combo = ComboBox()
+    workset_combo.DropDownStyle = ComboBoxStyle.DropDownList
+    workset_combo.Items.Add('Use Active Workset')
+    workset_combo.SelectedIndex = 0
+    place_field(workset_combo, 5, 'workset_display')
+    tips.SetToolTip(workset_combo, 'Uses the existing Revit annotation/workset behavior. No workset is reassigned.')
+
+    run_button = DesignButton('run', 'Run', 'Create the opening outlines and height notes.', 'play')
+    bounds(run_button, 46, 598, 584, 49)
+    run_button.TabIndex = 6
+    surface.Controls.Add(run_button)
+
+    def show_help_click(sender, event):
+        help_form = Form()
+        help_form.Text = "WD | Opening Tagger Help"
+        help_form.StartPosition = FormStartPosition.CenterParent
+        help_form.FormBorderStyle = FormBorderStyle.FixedDialog
+        help_form.MaximizeBox = False
+        help_form.MinimizeBox = False
+        help_form.ClientSize = Size(620, 500)
+        help_form.BackColor = C_WHITE
+        help_form.Font = Font("Segoe UI", 9.5)
+        help_form.ForeColor = C_INK
+
+        # Main heading
+        htitle = Label()
+        htitle.Text = "Opening Tagger — Quick Guide"
+        htitle.Font = Font("Segoe UI", 15.0, FontStyle.Bold)
+        htitle.ForeColor = C_INK
+        htitle.AutoSize = False
+        htitle.UseCompatibleTextRendering = True
+        htitle.TextAlign = System.Drawing.ContentAlignment.MiddleLeft
+        htitle.Location = Point(24, 16)
+        htitle.Size = Size(570, 36)
+        help_form.Controls.Add(htitle)
+
+        # PURPOSE — plain-language description of the result.
+        purpose_title = Label()
+        purpose_title.Text = "PURPOSE"
+        purpose_title.Font = Font("Segoe UI", 10.0, FontStyle.Bold)
+        purpose_title.ForeColor = C_RED
+        purpose_title.Location = Point(26, 66)
+        purpose_title.Size = Size(560, 22)
+        help_form.Controls.Add(purpose_title)
+
+        purpose_body = Label()
+        purpose_body.Text = ("Creates outline lines around matching wall openings and adds a label "
+                             "showing the height above finished floor (A.F.F.).")
+        purpose_body.Font = Font("Segoe UI", 9.5, FontStyle.Regular)
+        purpose_body.ForeColor = C_MUTED
+        purpose_body.AutoSize = False
+        purpose_body.UseCompatibleTextRendering = True
+        purpose_body.Location = Point(26, 90)
+        purpose_body.Size = Size(566, 42)
+        help_form.Controls.Add(purpose_body)
+
+        # SETTINGS — explain each visible field in familiar terms.
+        settings_title = Label()
+        settings_title.Text = "SETTINGS"
+        settings_title.Font = Font("Segoe UI", 10.0, FontStyle.Bold)
+        settings_title.ForeColor = C_RED
+        settings_title.Location = Point(26, 142)
+        settings_title.Size = Size(560, 22)
+        help_form.Controls.Add(settings_title)
+
+        settings_body = Label()
+        settings_body.Text = (
+            "Opening Family: choose which openings to mark.\n"
+            "Label Format: choose the note wording; {height} inserts the detected height.\n"
+            "Text Style: choose how the label looks.\n"
+            "Line Style: choose how the outline lines look.\n"
+            "Text Rotation: Auto turns the label to follow the opening.")
+        settings_body.Font = Font("Segoe UI", 9.5, FontStyle.Regular)
+        settings_body.ForeColor = C_MUTED
+        settings_body.AutoSize = False
+        settings_body.UseCompatibleTextRendering = True
+        settings_body.Location = Point(26, 168)
+        settings_body.Size = Size(566, 112)
+        help_form.Controls.Add(settings_body)
+
+        # INSTRUCTIONS — short sequence matching the actual workflow.
+        instructions_title = Label()
+        instructions_title.Text = "INSTRUCTIONS"
+        instructions_title.Font = Font("Segoe UI", 10.0, FontStyle.Bold)
+        instructions_title.ForeColor = C_RED
+        instructions_title.Location = Point(26, 290)
+        instructions_title.Size = Size(560, 22)
+        help_form.Controls.Add(instructions_title)
+
+        instructions_body = Label()
+        instructions_body.Text = (
+            "1. Open the plan view where the outlines should appear.\n"
+            "2. Confirm the Opening Family and review the label and line settings.\n"
+            "3. Click Run. The tool updates its own previous annotations automatically.\n"
+            "4. Check the new outlines and height labels in the same plan view.")
+        instructions_body.Font = Font("Segoe UI", 9.5, FontStyle.Regular)
+        instructions_body.ForeColor = C_MUTED
+        instructions_body.AutoSize = False
+        instructions_body.UseCompatibleTextRendering = True
+        instructions_body.Location = Point(26, 316)
+        instructions_body.Size = Size(566, 100)
+        help_form.Controls.Add(instructions_body)
+
+        close_button = Button()
+        close_button.Text = "Close"
+        close_button.Font = Font("Segoe UI", 9.5, FontStyle.Bold)
+        close_button.BackColor = C_RED
+        close_button.ForeColor = C_WHITE
+        close_button.FlatStyle = System.Windows.Forms.FlatStyle.Flat
+        close_button.FlatAppearance.BorderSize = 0
+        close_button.Location = Point(492, 448)
+        close_button.Size = Size(100, 32)
+        close_button.DialogResult = DialogResult.OK
+        help_form.Controls.Add(close_button)
+        help_form.AcceptButton = close_button
+        help_form.ShowDialog(form)
+        help_form.Dispose()
+    def show_user_guide(sender, event):
+        show_help_click(sender, event)
+
+    def show_training(sender, event):
+        # No training URL was supplied: show an honest local walkthrough instead.
+        MessageBox.Show(form,
+            '1. Open a Revit plan view.\n\n'
+            '2. Choose the opening family, label wording, text style and line style.\n\n'
+            '3. Review text rotation, then click Run.\n\n'
+            '4. Inspect the outlines and height notes in the active view.\n\n'
+            'A training video link has not been configured in this script.',
+            'Opening Tagger | Training', MessageBoxButtons.OK, MessageBoxIcon.Information)
+
+    def show_purpose(sender, event):
+        MessageBox.Show(form,
+            'The tool finds matching wall-opening families, traces their projected '
+            'footprints and creates overhead outlines with height notes in the active plan.\n\n'
+            'Rerunning replaces annotations previously generated by this tool.\n\n'
+            'The plan image is an illustration. The actual script keeps its original '
+            'geometry tracing, label positioning and rotation behavior.',
+            'Opening Tagger | How It Works', MessageBoxButtons.OK, MessageBoxIcon.Information)
+
+    help_cards = [
+        ('Training Video', 'Watch step-by-step demonstration\nof how to use this tool.', 'play', show_training),
+        ('User Guide', 'Open the complete user guide\nwith detailed instructions.', 'guide', show_user_guide),
+        ('How It Works?', 'Learn how this tool works\nand its purpose.', 'bulb', show_purpose)]
+    for index, (title, body, icon, handler) in enumerate(help_cards):
+        button = DesignButton('help', title, body, icon)
+        bounds(button, 28 + index * 520, 674, 504, 98)
+        button.TabIndex = 7 + index
+        button.Click += EventHandler(handler)
+        surface.Controls.Add(button)
+
+    def run_click(sender, event):
+        form.DialogResult = DialogResult.OK
+        form.Close()
+
+    run_button.Click += EventHandler(run_click)
+    form.AcceptButton = run_button
+    # Escape/close cancels before the execution routine opens any model transaction.
+    def close_on_escape(sender, event):
+        if event.KeyCode == System.Windows.Forms.Keys.Escape:
+            form.DialogResult = DialogResult.Cancel
+            form.Close()
+            event.Handled = True
+    form.KeyPreview = True
+    form.KeyDown += System.Windows.Forms.KeyEventHandler(close_on_escape)
+
+    def selected_object(combo, mapping):
+        label = str(combo.SelectedItem) if combo.SelectedItem is not None else ""
+        if label.startswith("<"):
+            return None
+        return mapping.get(label)
+
+    accepted = form.ShowDialog() == DialogResult.OK
+    if not accepted:
+        form.Dispose()
+        ui_font.Dispose()
+        logo_image.Dispose()
+        logo_stream.Dispose()
+        return None
+
+    opening_text_label = str(open_text_combo.SelectedItem or "")
+    line_label = str(line_combo.SelectedItem or "")
+    orientation = str(orientation_combo.SelectedItem or "Auto (Follow Opening)")
+
+    rot_deg = -1.0
+    if "Vertical" in orientation:
+        rot_deg = 90.0
+    elif "Horizontal" in orientation:
+        rot_deg = 0.0
+
+    settings = {
+        "run_room_finishes": False,
+        "run_opening_markup": True,
+        "create_missing_rooms": False,
+        "skip_existing_tagged_rooms": False,
+        "finish_text_type_name": "",
+        "finish_text_type": None,
+        "room_tag_type_name": "",
+        "room_tag_type": None,
+        "finish_gap_mm": 25.0,
+        "opening_filter": str(family_combo.Text or "").strip(),
+        "opening_text": str(opening_text_box.Text or ""),
+        "opening_text_type_name": opening_text_label if not opening_text_label.startswith("<") else "",
+        "opening_text_type": selected_object(open_text_combo, text_type_map),
+        "opening_line_style_name": line_label if not line_label.startswith("<") else "",
+        "opening_line_style": selected_object(line_combo, line_style_map),
+        "opening_rotation_deg": rot_deg,
+        "opening_offset_mm": 0.0,
+        "new_room_name": "",
+        "orientation": orientation,
+        "replace_existing_tags": True
+    }
+    form.Dispose()
+    ui_font.Dispose()
+    logo_image.Dispose()
+    logo_stream.Dispose()
+    return settings
+
+# -----------------------------------------------------------------------------
+# EXECUTION ROUTINE
+# -----------------------------------------------------------------------------
+ui_cancelled = False
+try:
+    smart_settings = show_smart_ui()
+    if smart_settings is None:
+        ui_cancelled = True
+    else:
+        run_room_finishes = smart_settings["run_room_finishes"]
+        run_opening_markup = smart_settings["run_opening_markup"]
+        create_missing_rooms = smart_settings["create_missing_rooms"]
+        skip_existing_tagged_rooms = smart_settings["skip_existing_tagged_rooms"]
+        finish_text_type_name = smart_settings["finish_text_type_name"]
+        opening_filter = smart_settings["opening_filter"]
+        opening_text = smart_settings["opening_text"]
+        opening_text_template = opening_text or 'BULKHEAD @ {height} A.F.F.'
+        opening_text_type_name = smart_settings["opening_text_type_name"]
+        opening_line_style_name = smart_settings["opening_line_style_name"]
+        finish_gap_mm = smart_settings["finish_gap_mm"]
+        opening_offset_mm = smart_settings["opening_offset_mm"]
+        opening_rotation_deg = smart_settings["opening_rotation_deg"]
+        replace_existing_tags = True  # Always replace this tool's tracked annotations on rerun.
+        room_tag_type_name = smart_settings["room_tag_type_name"]
+        new_room_name = smart_settings["new_room_name"]
+        finish_text_type = smart_settings["finish_text_type"]
+        opening_text_type = smart_settings["opening_text_type"]
+        selected_room_tag_type = smart_settings["room_tag_type"]
+        overhead_line_style = smart_settings["opening_line_style"]
+        report["UI"] = "Smart UI — Bulkhead Only"
+        report["AvailableTextNoteTypes"] = [get_element_name(x) for x in get_all_text_note_types()]
+        report["SelectedFinishTextType"] = finish_text_type_name
+        report["SelectedOpeningTextType"] = opening_text_type_name
+except Exception as ui_ex:
+    add_warning("UI error: {}".format(ui_ex))
+    report["Status"] = "UI ERROR — no model changes made"
+    report["FatalError"] = str(ui_ex)
+    ui_cancelled = True
+
+if ui_cancelled:
+    report["Status"] = "Cancelled by user"
+    OUT = report
+else:
+    try:
+        if view is None or view.ViewType not in (ViewType.FloorPlan, ViewType.CeilingPlan, ViewType.EngineeringPlan):
+            raise Exception("Open a Floor Plan, Reflected Ceiling Plan, or Engineering Plan view.")
+        view_level = view.GenLevel
+        view_elevation = view_level.Elevation
+        report["Level"] = get_element_name(view_level)
+
+        if run_room_finishes:
+            sheets = read_xlsx_sheets(excel_path)
+            ceiling_map = build_type_map(sheets.get("Ceiling Types", []), "Ceiling Types")
+            flooring_map = build_type_map(sheets.get("Flooring Types", []), "Flooring Types")
+        else:
+            ceiling_map = {}
+            flooring_map = {}
+
+        if finish_text_type is None and finish_text_type_name:
+            finish_text_type = find_type_by_name(BuiltInCategory.OST_TextNotes, finish_text_type_name)
+        if opening_text_type is None and opening_text_type_name:
+            opening_text_type = find_type_by_name(BuiltInCategory.OST_TextNotes, opening_text_type_name)
+        if selected_room_tag_type is None and room_tag_type_name:
+            selected_room_tag_type = find_room_tag_type_flexible(room_tag_type_name)
+        if overhead_line_style is None and opening_line_style_name:
+            overhead_line_style = get_line_style(opening_line_style_name)
+
+    except Exception as startup_err:
+        report["Status"] = "ERROR"
+        report["FatalError"] = str(startup_err)
+        OUT = report
+    else:
+        tx_started = False
+        try:
+            TransactionManager.Instance.EnsureInTransaction(doc)
+            tx_started = True
+
+            if create_missing_rooms and run_room_finishes:
+                create_missing_room_elements(view_level, view, new_room_name)
+
+            doc.Regenerate()
+
+            rooms = list(FilteredElementCollector(doc, view.Id).OfCategory(BuiltInCategory.OST_Rooms).WhereElementIsNotElementType().ToElements())
+            if not rooms:
+                all_rooms = list(FilteredElementCollector(doc).OfCategory(BuiltInCategory.OST_Rooms).WhereElementIsNotElementType().ToElements())
+                rooms = [r for r in all_rooms if r.Area > 1e-6 and (r.LevelId == view_level.Id or (r.Level and r.Level.Id == view_level.Id))]
+            
+            ceiling_elements = list(FilteredElementCollector(doc).OfCategory(BuiltInCategory.OST_Ceilings).WhereElementIsNotElementType().ToElements())
+            floor_elements = list(FilteredElementCollector(doc).OfCategory(BuiltInCategory.OST_Floors).WhereElementIsNotElementType().ToElements())
+            report["RoomsScanned"] = len(rooms)
+
+            room_tags_by_room = get_room_tags_in_view()
+            existing_text_notes = list(FilteredElementCollector(doc, view.Id).OfClass(TextNote).WhereElementIsNotElementType().ToElements())
+            existing_curve_elements = list(FilteredElementCollector(doc, view.Id).OfClass(CurveElement).WhereElementIsNotElementType().ToElements())
+
+            room_plans = []
+            for room in rooms:
+                existing_tags = room_tags_by_room.get(room.Id, [])
+                if existing_tags and skip_existing_tagged_rooms:
+                    report["RoomsSkippedAlreadyTagged"] += 1
+                    continue
+
+                base_elevation = get_room_base_elevation(room)
+                upper_elevation = get_room_upper_elevation(room, base_elevation)
+                most_spacious_pt = compute_room_most_empty_space(room, base_elevation, view_elevation)
+                if most_spacious_pt is None: continue
+
+                samples = room_sample_points(room, base_elevation, 7) or [(most_spacious_pt.X, most_spacious_pt.Y)]
+                ceiling_candidates = collect_spatial_type_groups(ceiling_elements, room, samples, base_elevation, upper_elevation, "ceiling")
+                floor_candidates = collect_spatial_type_groups(floor_elements, room, samples, base_elevation, upper_elevation, "floor")
+
+                selected_ceiling = ceiling_candidates[0] if ceiling_candidates else None
+                selected_floor = floor_candidates[0] if floor_candidates else None
+
+                room_name = get_room_display_name(room)
+                ceiling_type_name = selected_ceiling["type"] if selected_ceiling else ""
+                ceiling_code = find_shortcut(ceiling_type_name, ceiling_map) if selected_ceiling else ""
+                floor_type_name = selected_floor["type"] if selected_floor else ""
+                floor_code = find_shortcut(floor_type_name, flooring_map) if selected_floor else ""
+                
+                # Check if cooler/freezer -> skip ceiling & height, add flooring shortcut only
+                special_cold_room = is_cooler_or_freezer(room_name, ceiling_type_name, floor_type_name)
+                ceiling_height_text = ""
+
+                if not special_cold_room and selected_ceiling and ceiling_code and norm(ceiling_code) != "open":
+                    floor_ref_z = selected_floor["z"] if selected_floor else base_elevation
+                    height_ft = selected_ceiling["z"] - floor_ref_z
+                    if height_ft > 0.0: ceiling_height_text = format_feet_inches(height_ft)
+
+                detail_lines = []
+                if special_cold_room:
+                    if floor_code: detail_lines.append(floor_code)
+                else:
+                    if selected_ceiling:
+                        if ceiling_code: detail_lines.append(ceiling_code)
+                        if ceiling_code and norm(ceiling_code) != "open" and ceiling_height_text:
+                            detail_lines.append(ceiling_height_text)
+                    else:
+                        detail_lines.append("OPEN")
+                    if floor_code: detail_lines.append(floor_code)
+
+                room_plans.append({
+                    "room": room, "center": most_spacious_pt, "finish_text": "\n".join(detail_lines)
+                })
+
+            room_tag_targets = {}
+            if run_room_finishes:
+                for plan in room_plans:
+                    room = plan["room"]
+                    tags = room_tags_by_room.get(room.Id, [])
+                    tag = tags[0] if tags else None
+                    if tag is None:
+                        uv_pt = UV(plan["center"].X, plan["center"].Y)
+                        new_tag = None
+                        tag_error = None
+                        try:
+                            new_tag = doc.Create.NewRoomTag(LinkElementId(room.Id), uv_pt, view.Id)
+                        except Exception as tag_ex:
+                            tag_error = str(tag_ex)
+                            # Retry at the Room location point if the computed interior point is rejected.
+                            try:
+                                location = room.Location
+                                if isinstance(location, LocationPoint):
+                                    uv_fallback = UV(location.Point.X, location.Point.Y)
+                                    new_tag = doc.Create.NewRoomTag(LinkElementId(room.Id), uv_fallback, view.Id)
+                                    tag_error = None
+                            except Exception as fallback_ex:
+                                tag_error = "{} | fallback: {}".format(tag_error, fallback_ex)
+                        if new_tag:
+                            if selected_room_tag_type:
+                                try:
+                                    new_tag.ChangeTypeId(selected_room_tag_type.Id)
+                                except Exception as type_ex:
+                                    add_warning("Room {} tag was created but type '{}' could not be applied: {}".format(
+                                        get_element_name(room), room_tag_type_name, type_ex))
+                            tag = new_tag
+                            room_tags_by_room.setdefault(room.Id, []).append(new_tag)
+                            report["RoomTagsCreated"] += 1
+                        else:
+                            add_warning("Room Tag creation failed for Room '{}': {}".format(
+                                get_element_name(room), tag_error or "Revit did not return a RoomTag"))
+
+                    if tag: room_tag_targets[room.Id] = tag
+
+                doc.Regenerate()
+
+                if finish_text_type is None:
+                    add_warning("Room finish notes skipped: select a valid Finish Text Type.")
+                if finish_text_type:
+                    gap_ft = mm_to_ft(max(0.0, finish_gap_mm))
+                    for plan in room_plans:
+                        if not plan["finish_text"]: continue
+                        tag = room_tag_targets.get(plan["room"].Id)
+                        if tag is None:
+                            tags = room_tags_by_room.get(plan["room"].Id, [])
+                            tag = tags[0] if tags else None
+                        
+                        tag_bbox = get_tag_bbox(tag) if tag else None
+                        target = XYZ(tag_bbox.Min.X, tag_bbox.Min.Y - gap_ft, view_elevation) if tag_bbox else XYZ(plan["center"].X, plan["center"].Y - gap_ft, view_elevation)
+                        try:
+                            _, res = upsert_textnote(existing_text_notes, target, plan["finish_text"], finish_text_type, 0.0)
+                            if res == "created": report["FinishNotesCreated"] += 1
+                            elif res == "updated": report["FinishNotesUpdated"] += 1
+                        except Exception: pass
+
+            if run_opening_markup and opening_filter:
+                # Prefer explicitly selected Generic Models. If none are selected,
+                # scan all Generic Model instances in the document, not just the view.
+                selected_gms = bh_get_selected_generic_models(uiapp.ActiveUIDocument, doc)
+                report["SelectedGenericModels"] = len(selected_gms)
+                if selected_gms:
+                    opening_instances = []
+                    for candidate in selected_gms:
+                        if bh_matches(candidate, opening_filter, doc):
+                            opening_instances.append(candidate)
+                    if not opening_instances:
+                        # Explicit selection is a deliberate user target; trust it if
+                        # family/type names are not exposed by the API.
+                        opening_instances = selected_gms[:]
+                        add_warning("Selected Generic Models did not expose a matching family/type name; using the explicit selection.")
+                    report["OpeningScanScope"] = "selected Generic Models"
+                else:
+                    opening_instances = list(
+                        FilteredElementCollector(doc)
+                        .OfCategory(BuiltInCategory.OST_GenericModel)
+                        .WhereElementIsNotElementType()
+                        .ToElements()
+                    )
+                    opening_instances = [candidate for candidate in opening_instances
+                                         if bh_matches(candidate, opening_filter, doc)]
+                    report["OpeningScanScope"] = "document-wide Generic Models matching filter"
+
+                report["OpeningInstancesScanned"] = len(selected_gms) if selected_gms else len(
+                    FilteredElementCollector(doc).OfCategory(BuiltInCategory.OST_GenericModel)
+                    .WhereElementIsNotElementType().ToElements())
+                report["OpeningInstancesMatched"] = len(opening_instances)
+                report["OpeningFilter"] = opening_filter
+                # Replace this tool's prior annotations for the matched opening instances.
+                # The tracking data is attached to generated elements, so unrelated user
+                # detail lines/text notes are not deleted.
+                if replace_existing_tags:
+                    report["PreviousAnnotationsDeleted"] = bh_delete_previous_annotations(
+                        [x.Id.IntegerValue for x in opening_instances])
+                else:
+                    report["PreviousAnnotationsDeleted"] = 0
+                report["OpeningGeometry"] = []
+                report["OpeningHeightsDetected"] = []
+
+                if not opening_instances:
+                    examples = []
+                    try:
+                        all_gms = list(FilteredElementCollector(doc)
+                            .OfCategory(BuiltInCategory.OST_GenericModel)
+                            .WhereElementIsNotElementType().ToElements())
+                        for candidate in all_gms:
+                            fam, typ = bh_get_family_type(candidate, doc)
+                            label = "{} : {}".format(fam, typ)
+                            if label.strip(" :") and label not in examples:
+                                examples.append(label)
+                            if len(examples) >= 30:
+                                break
+                    except Exception:
+                        pass
+                    add_warning("No opening instances matched '{}'. Generic Model family/type examples: {}".format(
+                        opening_filter, " | ".join(examples) if examples else "<none found>"))
+
+                # Refresh annotation collectors after any room tags/notes were created.
+                existing_curve_elements = list(
+                    FilteredElementCollector(doc, view.Id).OfClass(CurveElement)
+                    .WhereElementIsNotElementType().ToElements())
+                existing_text_notes = list(
+                    FilteredElementCollector(doc, view.Id).OfClass(TextNote)
+                    .WhereElementIsNotElementType().ToElements())
+
+                if overhead_line_style is None and opening_line_style_name:
+                    overhead_line_style = get_line_style(opening_line_style_name)
+                report["RequestedOpeningLineStyle"] = opening_line_style_name
+                report["ResolvedOpeningLineStyle"] = (
+                    str(overhead_line_style.Name) if overhead_line_style is not None else None)
+                if overhead_line_style is None:
+                    add_warning("Bulkhead line style '{}' was not resolved; no bulkhead outline lines can be created.".format(
+                        opening_line_style_name))
+
+                if opening_text_type is None and opening_text_type_name:
+                    opening_text_type = find_type_by_name(BuiltInCategory.OST_TextNotes, opening_text_type_name)
+                if opening_text_type is None:
+                    add_warning("Bulkhead Text Note Type '{}' was not resolved; no bulkhead labels can be created.".format(
+                        opening_text_type_name))
+
+                for inst in opening_instances:
+                    try:
+                        bbox = bh_bbox_of(inst, view)
+                        if bbox is None:
+                            add_warning("Opening id {} has no bounding box; skipped.".format(inst.Id.IntegerValue))
+                            continue
+
+                        segments, geometry_source, center, angle = bh_rectangle_segments(inst, bbox, view_elevation)
+                        if not geometry_source.startswith("active-view family curves"):
+                            add_warning("Opening id {}: Revit did not expose visible family plan curves; used a transform/dimension fallback. Check report['OpeningGeometry'] before relying on exact overlay.".format(inst.Id.IntegerValue))
+                        # Recalculate from both sides of the actual generated outline, not just
+                        # the family insertion point or one edge. This centres the annotation
+                        # between the opposing long and short sides of the box.
+                        outline_center = bh_center_from_outline_segments(segments, angle, view_elevation)
+                        if outline_center is not None:
+                            center = outline_center
+                        report["OpeningGeometry"].append({
+                            "Id": inst.Id.IntegerValue,
+                            "OutlineSegments": len(segments),
+                            "OutlineSource": geometry_source,
+                            "CenterXYFt": (round(center.X, 3), round(center.Y, 3)),
+                            "AngleDegrees": round(math.degrees(angle), 2),
+                            "HostWallAngleDegrees": (round(math.degrees(bh_host_wall_angle(inst)), 2)
+                                                      if bh_host_wall_angle(inst) is not None else None)
+                        })
+
+                        # Trace every edge of the projected opening footprint.
+                        if overhead_line_style is not None:
+                            for seg_a, seg_b in segments:
+                                if seg_a.DistanceTo(seg_b) <= 0.05:
+                                    continue
+                                if detail_curve_matches(existing_curve_elements, seg_a, seg_b,
+                                                        opening_line_style_name, tolerance_ft=0.05):
+                                    report["OpeningLinesAlreadyPresent"] += 1
+                                    continue
+                                try:
+                                    detail = doc.Create.NewDetailCurve(view, Line.CreateBound(seg_a, seg_b))
+                                    detail.LineStyle = overhead_line_style
+                                    bh_tag_generated_annotation(detail, inst.Id.IntegerValue, "LINE")
+                                    existing_curve_elements.append(detail)
+                                    report["OpeningLinesCreated"] += 1
+                                except Exception as line_ex:
+                                    add_warning("Bulkhead outline segment failed for opening id {}: {}".format(
+                                        inst.Id.IntegerValue, line_ex))
+
+                        # Height is resolved from instance/type parameters, then model geometry.
+                        height_ft, height_source = bh_get_opening_height_ft(inst, bbox, view_elevation)
+                        height_text = bh_format_feet_inches(height_ft) if height_ft > 0.1 else "HEIGHT NOT FOUND"
+                        report["OpeningHeightsDetected"].append({
+                            "Id": inst.Id.IntegerValue,
+                            "Height": height_text,
+                            "Source": height_source
+                        })
+                        if height_ft <= 0.1:
+                            report["OpeningHeightsNotFoundCount"] = report.get("OpeningHeightsNotFoundCount", 0) + 1
+                            add_warning("Opening id {}: height could not be detected; label will say HEIGHT NOT FOUND.".format(
+                                inst.Id.IntegerValue))
+                        else:
+                            report["OpeningHeightsFoundCount"] = report.get("OpeningHeightsFoundCount", 0) + 1
+
+                        # Keep the label INSIDE the opening outline, at its traced center.
+                        # Use the angle returned by the same footprint geometry that created
+                        # the outline. Do not substitute Host wall direction or a manual angle:
+                        # either can differ from the actual projected opening in plan.
+                        template = opening_text_template or 'BULKHEAD @ {height} A.F.F.'
+                        resolved_text = template.replace("{height}", height_text)
+                        rot = bh_normalize_text_angle(angle)
+                        if opening_rotation_deg >= 0.0:
+                            rot = bh_normalize_text_angle(math.radians(opening_rotation_deg))
+                        text_pt = XYZ(center.X, center.Y, view_elevation)
+
+                        if opening_text_type is not None:
+                            try:
+                                note, result = upsert_textnote(existing_text_notes, text_pt, resolved_text,
+                                                               opening_text_type, rot)
+                                if note is not None:
+                                    bh_tag_generated_annotation(note, inst.Id.IntegerValue, "TEXT")
+                                    # Centre the visible text extents on the centre calculated
+                                    # between both sides of the outline, after applying rotation.
+                                    bh_center_note_visual_bbox(note, text_pt, view)
+                                if result == "created":
+                                    report["OpeningNotesCreated"] += 1
+                                elif result == "updated":
+                                    report["OpeningNotesUpdated"] += 1
+                            except Exception as note_ex:
+                                add_warning("Bulkhead text failed for opening id {}: {}".format(
+                                    inst.Id.IntegerValue, note_ex))
+                    except Exception as opening_ex:
+                        add_warning("Bulkhead processing failed for opening id {}: {}".format(
+                            inst.Id.IntegerValue, opening_ex))
+        except Exception as exec_err:
+            add_warning("Execution error: {}".format(exec_err))
+        finally:
+            if tx_started:
+                try: TransactionManager.Instance.TransactionTaskDone()
+                except Exception: pass
+
+        report["Status"] = "Completed with warnings" if report["Warnings"] else "Completed"
+        OUT = report
