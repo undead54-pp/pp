@@ -1,0 +1,284 @@
+<!doctype html>
+<html lang="en" data-theme="limestone">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<meta name="description" content="Pranay Parkar — an interactive BIM Modelling experience, from grids to geometry.">
+<title>Pranay Parkar | BIM Modelling — Interactive Studio</title>
+<style>
+:root{--bg:#f2ede4;--surface:#fffaf3;--surface2:#e9e0d3;--ink:#332d2a;--muted:#77716d;--stroke:#d3c7b8;--accent:#ab7d54;--metal:#a9aeb0;--glass:#719daa;--structure:#7c8184;--wash:#cfb998;--glow:#d5ad7c;--contrast:#352e29;--contrast-ink:#fff5e8}
+html[data-theme="noir"]{--bg:#16191c;--surface:#25292d;--surface2:#30343a;--ink:#f3ede3;--muted:#b6afa9;--stroke:#4c5055;--accent:#d0ab75;--metal:#919ca5;--glass:#75acc3;--structure:#b2b9bf;--wash:#7c725d;--glow:#a98251;--contrast:#e7d5b5;--contrast-ink:#22201e}
+html[data-theme="glacier"]{--bg:#e9f0f5;--surface:#fff;--surface2:#dce8f0;--ink:#18354e;--muted:#668397;--stroke:#bbcfdf;--accent:#367eb4;--metal:#8baabb;--glass:#478fb9;--structure:#547d95;--wash:#9cbfd2;--glow:#5f9bc4;--contrast:#173850;--contrast-ink:#f8fcff}
+html[data-theme="forest"]{--bg:#e9e9de;--surface:#faf9ef;--surface2:#dce2d4;--ink:#293f35;--muted:#687b6b;--stroke:#bec8b8;--accent:#ab7854;--metal:#8da093;--glass:#74a69c;--structure:#547565;--wash:#afb99b;--glow:#9aab83;--contrast:#293f35;--contrast-ink:#f9f9ed}
+html[data-theme="violet"]{--bg:#191725;--surface:#2b283a;--surface2:#363148;--ink:#f7efff;--muted:#b8aece;--stroke:#554965;--accent:#bfa4f3;--metal:#9a95b6;--glass:#a9a2de;--structure:#c5bce0;--wash:#6e638f;--glow:#8b6dd8;--contrast:#c9b8f8;--contrast-ink:#21182f}
+*{box-sizing:border-box}html{scroll-behavior:smooth}body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.6 "Segoe UI",Inter,Arial,sans-serif;overflow-x:hidden}button,input,select{font:inherit}button{cursor:pointer}button:focus-visible,input:focus-visible,select:focus-visible{outline:3px solid var(--accent);outline-offset:3px}::selection{background:var(--accent);color:var(--surface)}.site{max-width:1720px;margin:auto}.micro{color:var(--accent);font-size:10px;font-weight:800;letter-spacing:.19em;text-transform:uppercase}.muted{color:var(--muted)}.hidden{display:none!important}
+.topbar{height:78px;background:var(--surface);border-bottom:1px solid var(--stroke);display:flex;align-items:center;justify-content:space-between;padding:12px clamp(18px,3vw,52px);gap:22px;position:relative;z-index:4}.brand{display:flex;align-items:center;gap:17px;white-space:nowrap}.brandmark{font:italic 43px/.9 Georgia,serif;letter-spacing:-.16em;color:var(--accent);padding-right:8px}.brandtxt strong{display:block;font-size:12px;letter-spacing:.25em}.brandtxt small{display:block;font-size:9px;letter-spacing:.14em;color:var(--muted);margin-top:7px}.nav{display:flex;gap:8px}.nav a{color:var(--ink);text-decoration:none;font-size:11px;font-weight:700;padding:10px 12px;white-space:nowrap}.nav a:hover{color:var(--accent)}.nav .active{border-bottom:2px solid var(--accent)}.themeSelect{display:flex;align-items:center;gap:6px;flex-wrap:wrap}.themeSelect button{border:1px solid var(--stroke);background:none;color:var(--ink);padding:8px 10px;border-radius:30px;font-size:10px;line-height:1.2}.themeSelect button.active{background:var(--contrast);border-color:var(--contrast);color:var(--contrast-ink)}
+.hero{display:grid;grid-template-columns:minmax(0,1.1fr) minmax(310px,.9fr);gap:clamp(20px,4vw,65px);align-items:center;padding:clamp(34px,6vw,94px) clamp(20px,5vw,84px) clamp(33px,5vw,70px);min-height:380px;position:relative;overflow:hidden}.hero:after{content:"";position:absolute;pointer-events:none;width:350px;height:350px;right:-130px;top:-200px;border:1px solid var(--stroke);border-radius:50%;box-shadow:0 0 0 90px color-mix(in srgb,var(--accent) 5%,transparent),0 0 0 180px color-mix(in srgb,var(--accent) 3%,transparent)}.hero h1{font:400 clamp(54px,6.4vw,98px)/.96 Georgia,"Times New Roman",serif;letter-spacing:-.065em;margin:18px 0 26px;max-width:660px}.hero h1 em{color:var(--accent);font-weight:400}.hero p{max-width:570px;color:var(--muted);font-size:14px;line-height:1.9}.heroaside{border-left:1px solid var(--stroke);padding-left:28px;max-width:440px;align-self:end}.heroaside b{display:block;font:400 32px/1.1 Georgia,serif;margin:12px 0}.heroaside small{color:var(--muted);font-size:12px;line-height:1.8}.heroActions{display:flex;gap:10px;flex-wrap:wrap;margin-top:24px}.primary{background:var(--contrast);color:var(--contrast-ink);border:1px solid var(--contrast);border-radius:7px;padding:12px 19px;font-size:11px;font-weight:800}.secondary{background:transparent;color:var(--ink);border:1px solid var(--stroke);border-radius:7px;padding:12px 16px;font-size:11px;font-weight:700}.secondary:hover{border-color:var(--accent)}
+.sectionWrap{padding:0 clamp(13px,2.4vw,41px) 32px}.sectionTitle{display:flex;align-items:flex-end;justify-content:space-between;gap:20px;flex-wrap:wrap;margin:0 0 16px}.sectionTitle h2{font:400 clamp(26px,3vw,43px)/1.15 Georgia,serif;letter-spacing:-.035em;margin:10px 0 0}.sectionTitle p{color:var(--muted);font-size:11px;max-width:450px;margin:0}
+.workspace{display:grid;grid-template-columns:minmax(0,1fr) 305px;gap:14px}.viewport{height:570px;border:1px solid var(--stroke);border-radius:14px;overflow:hidden;background:radial-gradient(ellipse at 52% 48%,var(--surface) 0%,var(--surface2) 100%);position:relative;isolation:isolate}.ambient{position:absolute;width:60%;height:55%;left:18%;top:11%;background:var(--glow);filter:blur(70px);border-radius:50%;opacity:.11;pointer-events:none;animation:floatGlow 8s ease-in-out infinite alternate}@keyframes floatGlow{0%{transform:translate(-5%,8%) scale(.8);opacity:.08}100%{transform:translate(6%,-7%) scale(1.15);opacity:.18}}
+canvas{width:100%;height:100%;display:block;touch-action:none;cursor:grab;position:relative;z-index:1}canvas.dragging{cursor:grabbing}.hud{position:absolute;pointer-events:none;z-index:2;left:21px;right:21px;display:flex;justify-content:space-between;gap:12px}.hud.top{top:20px;align-items:flex-start}.hud.bottom{bottom:19px;align-items:flex-end}.hud .micro{font-size:9px}.hudlabel{display:inline-flex;gap:8px;align-items:center;background:color-mix(in srgb,var(--surface) 84%,transparent);border:1px solid var(--stroke);padding:7px 9px;border-radius:5px;color:var(--muted);font-size:9px}.zoomTools{display:flex;gap:5px;pointer-events:auto}.zoomTools button{background:var(--surface);border:1px solid var(--stroke);width:35px;height:35px;color:var(--ink);border-radius:6px;font-size:17px}.miniAxes{color:var(--muted);font-size:10px;letter-spacing:.1em}.pillLabel{background:var(--surface);border:1px solid var(--stroke);border-radius:4px;padding:5px 8px;color:var(--muted);font-size:9px}
+.inspector{background:var(--surface);border:1px solid var(--stroke);border-radius:14px;padding:22px 20px;display:flex;flex-direction:column;gap:20px}.inspector h3{font:400 30px Georgia,serif;margin:7px 0 9px}.inspector p{margin:0;color:var(--muted);font-size:11px;line-height:1.75}.sep{height:1px;background:var(--stroke)}.controlLabel{font-size:10px;text-transform:uppercase;font-weight:800;letter-spacing:.1em;color:var(--muted);margin-bottom:10px}.stageButtons{display:grid;gap:5px}.stageButtons button{display:flex;align-items:center;justify-content:space-between;gap:10px;border:1px solid var(--stroke);background:transparent;color:var(--ink);padding:10px 11px;border-radius:6px;text-align:left;font-size:11px}.stageButtons button.selected{border-color:var(--accent);background:var(--bg)}.stageButtons button small{color:var(--accent);font-size:10px;font-weight:800}.toggleGrid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px}.toggleGrid button{padding:9px 4px;border:1px solid var(--stroke);background:transparent;color:var(--ink);border-radius:6px;font-size:10px}.toggleGrid button.on{background:var(--contrast);border-color:var(--contrast);color:var(--contrast-ink)}.viewSwitch{display:flex;gap:5px}.viewSwitch button{flex:1;padding:10px 4px;background:transparent;color:var(--ink);border:1px solid var(--stroke);border-radius:6px;font-size:10px}.viewSwitch button.on{border-color:var(--accent);background:var(--bg)}.options{display:flex;gap:6px}.options button{flex:1;border:1px solid var(--stroke);color:var(--ink);background:transparent;border-radius:6px;font-size:10px;padding:9px}.options button.on{border-color:var(--accent);color:var(--accent)}
+.timeline{background:var(--surface);border:1px solid var(--stroke);border-radius:10px;margin-top:12px;padding:14px 18px;display:flex;align-items:center;gap:16px}.timeline input{flex:1;accent-color:var(--accent);min-width:0;cursor:pointer}.timeline b{font-size:10px;letter-spacing:.07em;color:var(--accent);width:130px}.timeline small{font-size:11px;color:var(--muted);min-width:38px;text-align:right}
+.evidence{padding:48px clamp(16px,3vw,48px) 70px}.evidence .sectionTitle{margin-bottom:24px}.evidenceGrid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:13px}.projectCard{background:var(--surface);border:1px solid var(--stroke);color:var(--ink);border-radius:8px;text-align:left;overflow:hidden;padding:0;min-width:0;transition:transform .25s,border-color .25s}.projectCard:hover{transform:translateY(-3px);border-color:var(--accent)}.thumb{background:var(--surface2);height:175px;display:grid;place-items:center;position:relative;overflow:hidden}.thumb img{width:100%;height:100%;object-fit:contain}.thumb .placeholder{font:italic 46px Georgia,serif;color:var(--accent);opacity:.30}.tag{position:absolute;top:11px;left:12px;background:var(--surface);font-size:9px;color:var(--accent);font-weight:800;letter-spacing:.09em;padding:5px 8px}.cardInfo{padding:16px 16px 15px}.cardInfo strong{display:block;font:400 20px/1.18 Georgia,serif;margin:6px 0 13px}.cardInfo small{display:block;color:var(--muted);font-size:10px}.cardInfo .category{font-size:9px;letter-spacing:.13em;font-weight:800;color:var(--accent)}.barline{height:1px;background:var(--stroke);margin:14px 0 10px}.cardFoot{display:flex;align-items:center;justify-content:space-between;gap:7px;color:var(--muted);font-size:10px}.cardFoot b{color:var(--accent);font-size:11px}.evidenceTools{display:flex;gap:9px;flex-wrap:wrap;align-items:center}.search{background:var(--surface);border:1px solid var(--stroke);color:var(--ink);border-radius:7px;padding:10px 12px;font-size:11px;min-width:170px}.importLabel{background:var(--contrast);color:var(--contrast-ink);border-radius:7px;padding:10px 15px;font-weight:800;font-size:11px;cursor:pointer}.importLabel input{display:none}.notice{padding:14px 16px;margin:0 0 21px;background:var(--surface);color:var(--muted);font-size:11px;border:1px solid var(--stroke);border-radius:8px;line-height:1.8}.notice b{color:var(--ink)}.footer{border-top:1px solid var(--stroke);padding:18px clamp(17px,3vw,50px);display:flex;align-items:center;justify-content:space-between;gap:14px;color:var(--muted);font-size:10px;flex-wrap:wrap}.footer strong{color:var(--ink)}
+.overlay{position:fixed;inset:0;background:rgba(8,11,14,.84);display:grid;place-items:center;z-index:30;padding:12px}.modal{width:min(1100px,100%);max-height:95vh;overflow:auto;background:var(--surface);color:var(--ink);border:1px solid var(--accent);border-radius:13px;box-shadow:0 25px 120px #0009}.modalTop{padding:17px 22px;border-bottom:1px solid var(--stroke);display:flex;align-items:center;justify-content:space-between;gap:15px}.modalTop button{border:1px solid var(--stroke);background:transparent;color:var(--ink);padding:9px 14px;border-radius:6px}.modalBody{display:grid;grid-template-columns:minmax(0,1.1fr) minmax(240px,.9fr)}.modalVisual{background:var(--surface2);min-height:360px;display:flex;align-items:center;justify-content:center;padding:12px;position:relative}.modalVisual img{width:100%;height:100%;max-height:550px;object-fit:contain}.modalVisual .empty{color:var(--muted);text-align:center;max-width:300px}.modalText{padding:29px 25px}.modalText h2{font:400 clamp(27px,3vw,43px)/1.15 Georgia,serif;letter-spacing:-.03em;margin:10px 0}.modalText p{color:var(--muted);font-size:12px;line-height:1.8}.mediaList{max-height:250px;overflow:auto;margin-top:16px;border-top:1px solid var(--stroke)}.mediaList button{display:flex;justify-content:space-between;gap:10px;width:100%;text-align:left;padding:11px 4px;border:0;border-bottom:1px solid var(--stroke);background:transparent;color:var(--ink);font-size:11px}.mediaList button.chosen{color:var(--accent);font-weight:800}.mediaList small{color:var(--muted);font-size:9px;white-space:nowrap}
+@media(max-width:1150px){.topbar{height:auto;flex-wrap:wrap}.nav{display:none}.workspace{grid-template-columns:1fr 270px}.hero h1{font-size:66px}}
+@media(max-width:850px){.hero{grid-template-columns:1fr;min-height:0}.heroaside{max-width:none}.workspace{grid-template-columns:1fr}.inspector{display:grid;grid-template-columns:1fr 1fr;align-items:start}.inspector>.sep{display:none}.evidenceGrid{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media(max-width:580px){.topbar{padding:13px 16px}.brandmark{font-size:31px}.themeSelect button{font-size:9px;padding:7px}.hero{padding:38px 20px}.hero h1{font-size:clamp(48px,12vw,68px)}.viewport{height:390px}.hud.top{top:11px;left:11px;right:11px}.hud.bottom{bottom:11px;left:11px;right:11px}.hudlabel{font-size:8px}.inspector{grid-template-columns:1fr;padding:16px}.timeline{padding:10px;gap:8px}.timeline b{width:90px;font-size:9px}.evidenceGrid{grid-template-columns:1fr}.thumb{height:220px}.modalBody{grid-template-columns:1fr}.modalVisual{min-height:250px}.modalText{padding:18px}}
+@media(prefers-reduced-motion:reduce){*{animation:none!important;scroll-behavior:auto!important;transition:none!important}}
+</style>
+</head>
+<body>
+<div class="site">
+<header class="topbar">
+ <div class="brand"><span class="brandmark">PP</span><span class="brandtxt"><strong>PRANAY PARKAR</strong><small>BIM DELIVERY · COORDINATION · AUTOMATION</small></span></div>
+ <nav class="nav" aria-label="Main sections"><a href="#modelling" class="active">BIM MODELLING</a><a href="#projects">PROJECT EVIDENCE</a></nav>
+ <div class="themeSelect" id="themes" aria-label="Portfolio themes"></div>
+</header>
+<main>
+<section class="hero">
+<div>
+ <div class="micro">CHAPTER 01 / BIM MODELLING</div>
+ <h1>Architecture,<br><em>assembled.</em></h1>
+ <p>From structural logic to architectural detail. A hands-on exploration of how digital buildings take shape, paired with genuine modelling evidence from residential, retail and commercial work.</p>
+ <div class="heroActions"><button class="primary" id="begin">▶ ASSEMBLE THE MODEL</button><button class="secondary" id="reset">↺ RESET EXPERIENCE</button></div>
+</div>
+<div class="heroaside">
+ <span class="micro">NOT A PASSIVE SHOWREEL</span>
+ <b>Explore the model.<br>Understand the work.</b>
+ <small>Drag to rotate, scroll or pinch to zoom, select building systems to isolate, and move between modelling stages. The model below is a procedural interactive study; the original project visuals remain separately identified.</small>
+</div>
+</section>
+<div class="sectionWrap" id="modelling">
+ <div class="sectionTitle"><div><span class="micro">01 — FROM GRIDS TO GEOMETRY</span><h2>An interactive model study</h2></div><p>Seven progressive modelling layers. One continuous, user-controlled spatial experience.</p></div>
+ <div class="workspace">
+  <div class="viewport" id="viewport"><div class="ambient"></div><canvas id="modelCanvas" tabindex="0" aria-label="Interactive procedural BIM model: drag to rotate, scroll to zoom, click building elements to isolate"></canvas>
+   <div class="hud top"><div><span class="micro">MODEL SPACE / AXONOMETRIC STUDY</span><div style="height:7px"></div><span class="pillLabel" id="activeSystem">ALL BUILDING SYSTEMS</span></div><div class="hudlabel" id="camLabel">ISO / 3D MODEL</div></div>
+   <div class="hud bottom"><div><span class="hudlabel">DRAG ↔ ROTATE · SCROLL ↕ ZOOM · CLICK → ISOLATE</span><div class="miniAxes" id="coordReadout" style="margin-top:8px">X / Y / Z</div></div><div class="zoomTools"><button id="zoomOut" aria-label="Zoom out">−</button><button id="zoomIn" aria-label="Zoom in">+</button><button id="fullScreen" aria-label="Fullscreen model">⛶</button></div></div>
+  </div>
+  <aside class="inspector">
+   <div><span class="micro">MODEL EXPLORER</span><h3>Build sequence</h3><p>Select any modelling phase or play the full assembly sequence.</p></div>
+   <div class="sep"></div><div><div class="controlLabel">Construction layers</div><div class="stageButtons" id="stages"></div></div>
+   <div class="sep"></div><div><div class="controlLabel">Isolate system</div><div class="toggleGrid" id="isolations"></div></div>
+   <div class="sep"></div><div><div class="controlLabel">Views</div><div class="viewSwitch" id="views"></div></div>
+   <div class="sep"></div><div><div class="controlLabel">Rendering options</div><div class="options"><button id="xray">X-RAY OFF</button><button id="wire">SOLID</button></div></div>
+   <div class="sep"></div><p id="stageDescription">Begin with setting-out grids, the foundation of model coordination.</p>
+  </aside>
+ </div>
+ <div class="timeline"><button class="secondary" id="playMini" aria-label="Play or pause assembly">▶</button><b id="stageName">01 · GRID SETOUT</b><input id="progress" type="range" min="0" max="100" value="0" aria-label="Model assembly timeline"><small id="progressValue">0%</small></div>
+</div>
+<section class="evidence" id="projects">
+ <div class="sectionTitle"><div><span class="micro">02 — REAL PROJECT EVIDENCE</span><h2>Beyond the demonstration.</h2></div><div class="evidenceTools"><input id="search" class="search" placeholder="Search projects..." aria-label="Search project catalogue"><label class="importLabel">IMPORT ORIGINAL PORTFOLIO<input id="sourceInput" type="file" accept=".html,.htm"></label></div></div>
+ <div class="notice" id="importNotice"><b>15 source project groups indexed.</b> Your original 3D model and drawing images can be loaded locally using <i>Pranay_Parkar_Portfolio_2026_Offline(4).html</i>. They are never uploaded anywhere. Project identities, contributions and media permissions remain subject to verification.</div>
+ <div id="projectGrid" class="evidenceGrid"></div>
+</section>
+</main>
+<footer class="footer"><span><strong>PRANAY PARKAR</strong> · BIM MODELLING / INTERACTIVE EXPERIENCE V1</span><span>100% STANDALONE HTML · NO CDN · NO GENERATED PROJECT EVIDENCE</span></footer>
+</div>
+<div id="modalRoot"></div>
+<script>
+(function(){
+'use strict';
+var $=function(id){return document.getElementById(id)},root=document.documentElement;
+var themes=[['limestone','Limestone'],['noir','Midnight'],['glacier','Glacier'],['forest','Forest'],['violet','Obsidian']];
+var groups=['Grids','Columns','Beams','Slabs','Walls','Glazing','Roof'];
+var stages=[['01','Grid setout','Reference axes and structural planning'],['02','Vertical structure','Columns and primary supports'],['03','Structural framing','Horizontal beams and grid alignment'],['04','Floor systems','Floor plates and levels'],['05','Architectural envelope','Walls and defined façades'],['06','Building glazing','Windows and transparent openings'],['07','Completed model','Roof assembly and integrated geometry']];
+var stageStops=[0,.18,.31,.45,.61,.76,1];
+var projects=[
+{name:'German multi-unit residential — Study A',category:'Residential',id:'case-germany-a',description:'Architectural BIM documentation for an existing German multi-unit residential building.',media:[['Street elevation model','evidence/view-00.png','3D'],['Courtyard elevation model','evidence/view-01.png','3D'],['Elevations and sections','evidence/view-02.png','2D'],['Building plan and site references','evidence/view-03.png','2D']]},
+{name:'German residential — Study B',category:'Residential',id:'case-germany-b',description:'Existing-condition study with photo and point-cloud references and architectural model views.',media:[['Street-side architectural model','evidence/view-04.png','3D'],['Alternate architectural model','evidence/view-06.png','3D'],['Floor plan 1','evidence/view-05.png','2D'],['Apartment plan and axonometric','evidence/view-07.png','2D'],['Floor plan 2','evidence/view-08.png','2D'],['Elevations and sections','evidence/view-09.png','2D']]},
+{name:'Danish residential — model documentation',category:'Residential / Structural',id:'case-denmark',description:'Architectural and structural documentation paired with source drawings.',media:[['Building model, street side','evidence/view-12.png','3D'],['Building model, courtyard side','evidence/view-13.png','3D'],['Plan A-5-1-10','evidence/view-14.png','2D'],['Plan A-5-1-11','evidence/view-15.png','2D'],['Plan A-5-1-12','evidence/view-17.png','2D'],['End elevations','evidence/view-16.png','2D'],['Long elevations','evidence/view-18.png','2D']]},
+{name:'Automotive facility — site and building',category:'Commercial',id:'case-automotive',description:'Building model and accompanying site layout.',media:[['Site and building model','evidence/view-23.png','3D'],['Layout drawing','evidence/view-24.png','2D']]},
+{name:'Food-service fit-out — equipment & models',category:'Commercial',id:'case-foodservice',description:'Architectural fit-out and equipment placement model with technical drawings.',media:[['Service counter model','evidence/view-30.png','3D'],['Counter fit-out model','evidence/view-32.png','3D'],['Equipment and room model','evidence/view-35.png','3D'],['Equipment layout and schedule','evidence/view-31.png','2D'],['Equipment elevations','evidence/view-33.png','2D'],['Service layout','evidence/view-34.png','2D']]},
+{name:'Warehouse retail — structural coordination',category:'Structural',id:'case-retail',description:'Warehouse shell and framing model documentation.',media:[['Overall warehouse shell','evidence/view-36.png','3D'],['Structural view','retail-structure.webp','3D']]},
+{name:'Brick residential building',category:'Residential',id:'case-residential-brick',description:'Brick roof and building-envelope modelling reference.',media:[['Brick roof model','evidence/view-11.png','3D']]},
+{name:'Multi-wing residential building',category:'Residential',id:'case-residential-heritage',description:'Roof and enclosure model of a multi-wing building.',media:[['Multi-wing envelope','evidence/view-10.png','3D']]},
+{name:'Curved residential complex',category:'Residential',id:'case-residential-curved',description:'Curved block model with accompanying drawing.',media:[['Curved block model','evidence/view-19.png','3D'],['Curved block drawing','evidence/view-20.png','2D']]},
+{name:'Residential roof and terrain',category:'Residential',id:'case-residential-roof',description:'Roof and terrain model reference.',media:[['Roof and terrain','evidence/view-21.png','3D']]},
+{name:'Low-rise residential model',category:'Residential',id:'case-residential-low-rise',description:'Low-rise architectural modelling reference.',media:[['Low-rise model','evidence/view-22.png','3D']]},
+{name:'Multi-storey commercial building',category:'Commercial',id:'case-commercial-block',description:'Commercial building façades and overall geometry.',media:[['Commercial façade','evidence/view-26.png','3D'],['Courtyard façade','evidence/view-25.png','3D']]},
+{name:'Commercial interior model',category:'Commercial',id:'case-commercial-interior',description:'Interior partitions and furniture model.',media:[['Interior model','evidence/view-27.png','3D']]},
+{name:'Commercial roof / envelope framing',category:'Structural',id:'case-commercial-roof',description:'Building envelope and roof framing documentation.',media:[['Architectural enclosure','evidence/view-28.png','3D'],['Roof framing','evidence/view-29.png','3D']]},
+{name:'Retail shell — model and floor plan',category:'Retail',id:'case-retail-grids',description:'Warehouse shell with structural grids and floor plan.',media:[['Shell and grid model','evidence/view-38.png','3D'],['Grid and floor plan','evidence/view-39.png','2D']]}
+];
+var mediaCache=Object.create(null),play=false,progress=0,selected='',xray=false,wireframe=false,curYaw=-.73,curPitch=.62,curZoom=1.04,targetYaw=-.73,targetPitch=.62,targetZoom=1.04,viewPreset='ISO',drag=null,dragMoved=false,imagesImported=0;
+var canvas=$('modelCanvas'),ctx=canvas.getContext('2d'),drawn=[],objects=[],lastTime=0,reduce=window.matchMedia&&window.matchMedia('(prefers-reduced-motion:reduce)').matches;
+function el(tag,cls,content){var x=document.createElement(tag);if(cls)x.className=cls;if(content!=null)x.textContent=content;return x}
+function saveTheme(t){root.dataset.theme=t;root.style.colorScheme=(t==='noir'||t==='violet')?'dark':'light';try{localStorage.setItem('ppBimTheme',t)}catch(e){}showThemes()}
+function showThemes(){var h=$('themes');h.textContent='';themes.forEach(function(item){var b=el('button',root.dataset.theme===item[0]?'active':'',item[1]);b.setAttribute('aria-pressed',root.dataset.theme===item[0]?'true':'false');b.onclick=function(){saveTheme(item[0])};h.appendChild(b)})}
+try{var saved=localStorage.getItem('ppBimTheme');if(themes.some(function(t){return t[0]===saved}))root.dataset.theme=saved}catch(e){}
+showThemes();
+function paint(name){return getComputedStyle(root).getPropertyValue('--'+name).trim()}
+function rgba(hex,a){hex=hex.replace('#','');if(hex.length===3)hex=hex.split('').map(function(c){return c+c}).join('');if(hex.length!==6)return hex;return 'rgba('+parseInt(hex.slice(0,2),16)+','+parseInt(hex.slice(2,4),16)+','+parseInt(hex.slice(4,6),16)+','+a+')'}
+function clamp(x,a,b){return Math.min(b,Math.max(a,x))}
+function ease(x){x=clamp(x,0,1);return x*x*(3-2*x)}
+function add(group,kind,pts,mat){objects.push({group:group,kind:kind,pts:pts,mat:mat})}
+function boxFrame(x,z,h){add('Columns','line',[[x,0,z],[x,h,z]],'column')}
+function shapeGeometry(){
+ objects=[];
+ for(var x=0;x<=12;x+=1.5)add('Grids','line',[[x,-.09,-1.2],[x,-.09,9.2]],'grid');
+ for(var z=0;z<=8;z+=1.5)add('Grids','line',[[-1.2,-.09,z],[13.2,-.09,z]],'grid');
+ for(var colX=0;colX<=12;colX+=3)for(var colZ=0;colZ<=8;colZ+=4)boxFrame(colX,colZ,6.6);
+ [3.3,6.55].forEach(function(y){for(var z=0;z<=8;z+=4)add('Beams','line',[[0,y,z],[12,y,z]],'beam');for(var x=0;x<=12;x+=3)add('Beams','line',[[x,y,0],[x,y,8]],'beam')});
+ [0.12,3.37,6.67].forEach(function(y){add('Slabs','poly',[[0,y,0],[12,y,0],[12,y,8],[0,y,8]],'slab')});
+ [0.18,3.4].forEach(function(y){
+  for(var x=0;x<12;x+=3){
+   add('Walls','poly',[[x,y,0],[x+3,y,0],[x+3,y+2.85,0],[x,y+2.85,0]],'wall');
+   add('Glazing','poly',[[x+.35,y+.68,-.045],[x+2.65,y+.68,-.045],[x+2.65,y+2.42,-.045],[x+.35,y+2.42,-.045]],'glass')
+  }
+  for(var z=0;z<8;z+=2){
+   add('Walls','poly',[[12,y,z],[12,y,z+2],[12,y+2.85,z+2],[12,y+2.85,z]],'wall');
+   add('Glazing','poly',[[12.045,y+.65,z+.24],[12.045,y+.65,z+1.75],[12.045,y+2.37,z+1.75],[12.045,y+2.37,z+.24]],'glass')
+  }
+ });
+ add('Roof','poly',[[0,6.92,0],[12,6.92,0],[12,6.92,8],[0,6.92,8]],'roof');
+ for(var r=0;r<=12;r+=2)add('Roof','line',[[r,6.96,0],[r,6.96,8]],'roofline');
+}
+shapeGeometry();
+function project(p,scale,w,h){
+ var x=p[0]-6,y=p[1]-2.7,z=p[2]-4,ca=Math.cos(curYaw),sa=Math.sin(curYaw),cp=Math.cos(curPitch),sp=Math.sin(curPitch);
+ var xr=x*ca-z*sa,zr=x*sa+z*ca;
+ return {x:w*.5+xr*scale,y:h*.56+(zr*sp-y*cp)*scale,depth:zr*cp+y*sp}
+}
+function visibility(group){
+ var start={Grids:0,Columns:.10,Beams:.25,Slabs:.38,Walls:.52,Glazing:.70,Roof:.84}[group];
+ return ease((progress-start)/.13)
+}
+function path(points,close){
+ ctx.beginPath();points.forEach(function(p,i){if(i===0)ctx.moveTo(p.x,p.y);else ctx.lineTo(p.x,p.y)});if(close)ctx.closePath()
+}
+function colourFor(o){
+ if(o.mat==='glass')return rgba(paint('glass'),.60);
+ if(o.mat==='wall')return rgba(paint('metal'),.72);
+ if(o.mat==='slab')return rgba(paint('structure'),.62);
+ if(o.mat==='roof')return rgba(paint('metal'),.83);
+ return paint('structure')
+}
+function draw(){
+ var w=canvas.clientWidth,h=canvas.clientHeight;if(w<1||h<1)return;
+ var ratio=Math.min(window.devicePixelRatio||1,2),rw=Math.round(w*ratio),rh=Math.round(h*ratio);
+ if(canvas.width!==rw||canvas.height!==rh){canvas.width=rw;canvas.height=rh}
+ ctx.setTransform(ratio,0,0,ratio,0,0);ctx.clearRect(0,0,w,h);
+ var scale=Math.min(w/22,h/13.5)*curZoom;
+ // Secondary ground reference lines
+ for(var k=-4;k<=16;k+=2){
+  path([project([k,-.2,-5],scale,w,h),project([k,-.2,13],scale,w,h)],false);
+  ctx.strokeStyle=rgba(paint('stroke'),.34);ctx.lineWidth=.65;ctx.stroke()
+ }
+ for(var q=-4;q<=12;q+=2){
+  path([project([-5,-.2,q],scale,w,h),project([17,-.2,q],scale,w,h)],false);
+  ctx.strokeStyle=rgba(paint('stroke'),.34);ctx.lineWidth=.65;ctx.stroke()
+ }
+ drawn=[];
+ var shapes=objects.map(function(o){
+  var vis=visibility(o.group),pts=o.pts.map(function(pt){var copy=[pt[0],pt[1]-(1-vis)*(.68),pt[2]];return project(copy,scale,w,h)});
+  var depth=pts.reduce(function(sum,pt){return sum+pt.depth},0)/pts.length;
+  return {o:o,pts:pts,vis:vis,depth:depth}
+ }).filter(function(s){return s.vis>.001});
+ shapes.sort(function(a,b){return b.depth-a.depth});
+ shapes.forEach(function(s){
+  var o=s.o,active=!selected||o.group===selected,alpha=s.vis*(active?1:.10)*(xray?.48:1);
+  if(o.group==='Grids'&&selected&&selected!=='Grids')alpha*=.45;
+  ctx.globalAlpha=alpha;
+  if(o.kind==='line'){
+   path(s.pts,false);
+   ctx.strokeStyle=o.mat==='grid'?paint('accent'):o.mat==='beam'?paint('structure'):o.mat==='roofline'?paint('ink'):paint('accent');
+   ctx.setLineDash(o.mat==='grid'?[3,5]:[]);
+   ctx.lineWidth=o.mat==='column'?2.7:o.mat==='beam'?2.1:1;
+   ctx.stroke();ctx.setLineDash([])
+  }else{
+   path(s.pts,true);
+   if(!wireframe){ctx.fillStyle=colourFor(o);ctx.fill()}
+   ctx.lineWidth=1;ctx.strokeStyle=paint('ink');ctx.stroke();
+   if(o.mat==='glass'){path([s.pts[0],s.pts[2]],false);ctx.strokeStyle=paint('structure');ctx.lineWidth=.6;ctx.stroke()}
+   drawn.push({group:o.group,pts:s.pts})
+  }
+  ctx.globalAlpha=1
+ });
+ $('coordReadout').textContent='ORBIT '+Math.round(curYaw*57.3)+'° / TILT '+Math.round(curPitch*57.3)+'° / ZOOM '+Math.round(curZoom*100)+'%';
+}
+function stageIndex(){var i=0;stageStops.forEach(function(s,j){if(progress+0.001>=s)i=j});return i}
+function updateControls(){
+ var idx=stageIndex();
+ $('stages').textContent='';
+ stages.forEach(function(s,i){var b=el('button',idx===i?'selected':'');var num=el('small','',s[0]),txt=el('span','',s[1]);b.append(num,txt);b.setAttribute('aria-pressed',idx===i?'true':'false');b.onclick=function(){play=false;progress=stageStops[i];updateControls()};$('stages').appendChild(b)});
+ $('isolations').textContent='';
+ ['All'].concat(groups).forEach(function(g){var chosen=(g==='All'&&!selected)||g===selected,b=el('button',chosen?'on':'',g);b.setAttribute('aria-pressed',chosen?'true':'false');b.onclick=function(){selected=(g==='All'||selected===g)?'':g;if(selected&&visibility(selected)<.25)progress=1;updateControls()};$('isolations').appendChild(b)});
+ $('views').textContent='';
+ ['ISO','FRONT','TOP'].forEach(function(v){var b=el('button',viewPreset===v?'on':'',v);b.onclick=function(){viewPreset=v;if(v==='ISO'){targetYaw=-.73;targetPitch=.62}else if(v==='FRONT'){targetYaw=0;targetPitch=.17}else{targetYaw=-.4;targetPitch=1.52}updateControls()};$('views').appendChild(b)});
+ $('activeSystem').textContent=selected?selected.toUpperCase()+' / ISOLATED':'ALL BUILDING SYSTEMS';
+ $('stageDescription').textContent=stages[idx][2];
+ $('stageName').textContent=stages[idx][0]+' · '+stages[idx][1].toUpperCase();
+ $('progress').value=Math.round(progress*100);$('progressValue').textContent=Math.round(progress*100)+'%';
+ $('camLabel').textContent=(viewPreset==='CUSTOM'?'CUSTOM CAMERA':viewPreset)+' / 3D MODEL';
+ $('xray').textContent=xray?'X-RAY ON':'X-RAY OFF';$('xray').classList.toggle('on',xray);
+ $('wire').textContent=wireframe?'WIREFRAME':'SOLID';$('wire').classList.toggle('on',wireframe);
+ $('begin').textContent=play?'Ⅱ PAUSE ASSEMBLY':progress>=1?'↻ REPLAY ASSEMBLY':'▶ ASSEMBLE THE MODEL';
+ $('playMini').textContent=play?'Ⅱ':'▶'
+}
+function start(){if(reduce){progress=1;play=false}else{if(progress>=1)progress=0;play=!play}updateControls()}
+$('begin').onclick=start;$('playMini').onclick=start;
+$('reset').onclick=function(){play=false;progress=0;selected='';xray=false;wireframe=false;targetYaw=-.73;targetPitch=.62;targetZoom=1.04;viewPreset='ISO';updateControls()};
+$('progress').oninput=function(e){play=false;progress=clamp(Number(e.target.value)/100,0,1);updateControls()};
+$('xray').onclick=function(){xray=!xray;updateControls()};
+$('wire').onclick=function(){wireframe=!wireframe;updateControls()};
+$('zoomIn').onclick=function(){targetZoom=clamp(targetZoom*1.18,.45,2.4)};
+$('zoomOut').onclick=function(){targetZoom=clamp(targetZoom/1.18,.45,2.4)};
+$('fullScreen').onclick=function(){var v=$('viewport');if(!document.fullscreenElement&&v.requestFullscreen){v.requestFullscreen().catch(function(){})}else if(document.exitFullscreen)document.exitFullscreen()};
+canvas.addEventListener('pointerdown',function(e){drag={x:e.clientX,y:e.clientY,lx:e.clientX,ly:e.clientY};dragMoved=false;canvas.setPointerCapture(e.pointerId);canvas.classList.add('dragging')});
+canvas.addEventListener('pointermove',function(e){if(!drag)return;var dx=e.clientX-drag.lx,dy=e.clientY-drag.ly;if(Math.abs(e.clientX-drag.x)+Math.abs(e.clientY-drag.y)>5)dragMoved=true;targetYaw+=dx*.009;targetPitch=clamp(targetPitch+dy*.008,.035,1.53);drag.lx=e.clientX;drag.ly=e.clientY;if(dragMoved){viewPreset='CUSTOM';$('camLabel').textContent='CUSTOM CAMERA / 3D MODEL'}});
+canvas.addEventListener('pointerup',function(e){canvas.classList.remove('dragging');if(!dragMoved){var rect=canvas.getBoundingClientRect(),x=e.clientX-rect.left,y=e.clientY-rect.top;for(var i=drawn.length-1;i>=0;i--){if(inside(x,y,drawn[i].pts)){var g=drawn[i].group;selected=selected===g?'':g;progress=1;updateControls();break}}}drag=null});
+canvas.addEventListener('pointercancel',function(){drag=null;canvas.classList.remove('dragging')});
+canvas.addEventListener('wheel',function(e){e.preventDefault();targetZoom=clamp(targetZoom*(e.deltaY>0?.91:1.09),.45,2.4)},{passive:false});
+function inside(x,y,poly){var hit=false;for(var i=0,j=poly.length-1;i<poly.length;j=i++){var a=poly[i],b=poly[j];if((a.y>y)!==(b.y>y)&&x<(b.x-a.x)*(y-a.y)/(b.y-a.y)+a.x)hit=!hit}return hit}
+window.addEventListener('keydown',function(e){if(e.target&&['INPUT','TEXTAREA','SELECT'].includes(e.target.tagName))return;if(e.key==='Escape'){if($('modalRoot').firstChild)closeModal();else if(selected){selected='';updateControls()}}if(e.code==='Space'){e.preventDefault();start()}if(e.key==='+'||e.key==='=')targetZoom=clamp(targetZoom*1.15,.45,2.4);if(e.key==='-')targetZoom=clamp(targetZoom/1.15,.45,2.4);if(/^[1-7]$/.test(e.key)){play=false;progress=stageStops[Number(e.key)-1];updateControls()}});
+function tick(t){
+ var dt=Math.min(60,t-lastTime||16);lastTime=t;
+ if(play){progress=clamp(progress+dt/6500,0,1);if(progress>=1)play=false;var next=stageIndex();if(next!==tick.lastStage||progress>=1){tick.lastStage=next;updateControls()}else{$('progress').value=Math.round(progress*100);$('progressValue').textContent=Math.round(progress*100)+'%'}}
+ var factor=reduce?1:clamp(dt*.011,0,1);
+ curYaw+=(targetYaw-curYaw)*factor;curPitch+=(targetPitch-curPitch)*factor;curZoom+=(targetZoom-curZoom)*factor;
+ draw();requestAnimationFrame(tick)
+}
+updateControls();requestAnimationFrame(tick);
+function mediaSource(path){return mediaCache[path]||mediaCache[path.split('/').pop()]||null}
+function projectGrid(){
+ var q=$('search').value.trim().toLowerCase(),container=$('projectGrid');container.textContent='';
+ var hits=projects.filter(function(p){return (p.name+' '+p.category+' '+p.description).toLowerCase().includes(q)});
+ hits.forEach(function(p){var i=projects.indexOf(p),b=el('button','projectCard'),thumb=el('div','thumb'),preview=mediaSource(p.media[0][1]);
+  if(preview){var img=el('img');img.loading='lazy';img.alt=p.media[0][0];img.src=preview;thumb.appendChild(img)}else thumb.appendChild(el('div','placeholder','BIM'));
+  thumb.appendChild(el('span','tag','PROJECT / '+String(i+1).padStart(2,'0')));
+  var inf=el('div','cardInfo');inf.appendChild(el('span','category',p.category));inf.appendChild(el('strong','',p.name));inf.appendChild(el('small','',p.description));inf.appendChild(el('div','barline'));
+  var ft=el('div','cardFoot');ft.appendChild(el('span','',p.media.filter(function(m){return m[2]==='3D'}).length+' model view(s) · '+p.media.filter(function(m){return m[2]==='2D'}).length+' drawing(s)'));ft.appendChild(el('b','','EXPLORE ↗'));inf.appendChild(ft);b.append(thumb,inf);b.onclick=function(){openModal(p)};container.appendChild(b)
+ });
+ if(!hits.length)container.appendChild(el('p','muted','No project groups match this search.'))
+}
+$('search').addEventListener('input',projectGrid);projectGrid();
+function openModal(p){
+ var rootModal=$('modalRoot');rootModal.textContent='';var overlay=el('div','overlay'),modal=el('div','modal');modal.setAttribute('role','dialog');modal.setAttribute('aria-modal','true');modal.setAttribute('aria-label',p.name);
+ var top=el('div','modalTop');top.appendChild(el('span','micro','PROJECT EVIDENCE / BIM MODELLING'));var close=el('button','','CLOSE ×');close.onclick=closeModal;top.appendChild(close);
+ var body=el('div','modalBody'),vis=el('div','modalVisual'),content=el('div','modalText');
+ content.appendChild(el('span','micro',p.category));content.appendChild(el('h2','',p.name));content.appendChild(el('p','',p.description));content.appendChild(el('p','','Original model and drawing source paths are preserved below. Entries with different camera views remain part of one project group.'));
+ var list=el('div','mediaList');var display=function(m){vis.textContent='';var src=mediaSource(m[1]);if(src){var img=el('img');img.src=src;img.alt=m[0];vis.appendChild(img)}else{vis.appendChild(el('p','empty','Source image not embedded in this file. Import the original offline portfolio HTML to display this evidence.'))}};
+ p.media.forEach(function(m,j){var row=el('button',j===0?'chosen':'');row.appendChild(el('span','',m[0]));row.appendChild(el('small','',m[2]));row.onclick=function(){Array.from(list.children).forEach(function(b){b.classList.remove('chosen')});row.classList.add('chosen');display(m)};list.appendChild(row)});
+ content.appendChild(list);content.appendChild(el('p','','Project identity and contribution descriptions must be verified before publication. The interactive schematic above is not a reconstruction of this project.'));
+ body.append(vis,content);modal.append(top,body);overlay.appendChild(modal);rootModal.appendChild(overlay);overlay.onclick=function(e){if(e.target===overlay)closeModal()};display(p.media[0]);close.focus()
+}
+function closeModal(){$('modalRoot').textContent=''}
+$('sourceInput').addEventListener('change',async function(e){
+ var file=e.target.files&&e.target.files[0];if(!file)return;
+ $('importNotice').textContent='Reading embedded source images locally… No upload is taking place.';
+ try{
+  var text=await file.text(),marker='window.__EMBEDDED_ASSETS__=',begin=text.indexOf(marker);
+  if(begin<0){marker='window.__OFFLINE_ASSETS__=';begin=text.indexOf(marker)}
+  if(begin<0)throw Error('Embedded image dictionary not found. Choose the supplied offline portfolio HTML.');
+  var start=begin+marker.length,end=text.indexOf('};',start);
+  if(end<0)throw Error('Embedded assets dictionary was incomplete.');
+  mediaCache=JSON.parse(text.slice(start,end+1));imagesImported=projects.reduce(function(count,p){return count+p.media.filter(function(m){return !!mediaSource(m[1])}).length},0);
+  $('importNotice').textContent='Imported '+file.name+' · '+imagesImported+' of 40 indexed project media entries matched. Images remain on this device and are not uploaded. Unmatched source entries stay listed.';
+  projectGrid();
+ }catch(err){$('importNotice').textContent='Unable to import media: '+err.message}
+});
+})();
+</script>
+</body>
+</html>
