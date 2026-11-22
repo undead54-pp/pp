@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex,nofollow">
+<title>Pranay Parkar | Interactive BIM Portfolio 2026</title>
+<style>html,body{margin:0;min-height:100%;background:#151719;color:#f3ece2;font:16px Arial,sans-serif}#notice{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;flex-direction:column;gap:12px;text-align:center;padding:24px}#notice strong{font-size:20px}#notice p{max-width:38rem;line-height:1.6;color:#bbb}a{color:#d5b080}</style>
+</head>
+<body><div id="notice"><strong>Opening interactive BIM portfolio…</strong><p>Loading the complete standalone project portfolio.</p></div>
+<script>
+(async function(){
+  const source='https://d2ol7oe51mr4n9.cloudfront.net/user_3KrZhfUJuHSTWkAJncAOcYiLALt/69fdb414-445c-4c14-b469-18aaab8d60d6.html';
+  try{
+    const res=await fetch(source,{mode:'cors',cache:'default'});
+    if(!res.ok)throw new Error('HTTP '+res.status);
+    const html=await res.text();
+    if(!/^\s*<!doctype html/i.test(html)&&!/<html\b/i.test(html))throw new Error('Unexpected response');
+    document.open();document.write(html);document.close();
+  }catch(err){
+    const el=document.getElementById('notice');
+    if(el)el.innerHTML='<strong>Portfolio could not load.</strong><p>Please refresh the page or <a href="'+source+'">download the HTML file</a> and open it in your browser.</p>';
+    console.error(err);
+  }
+})();
+</script>
+</body></html>
