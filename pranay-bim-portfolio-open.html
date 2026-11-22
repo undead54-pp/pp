@@ -5,23 +5,56 @@
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="robots" content="noindex,nofollow">
 <title>Pranay Parkar | Interactive BIM Portfolio 2026</title>
-<style>html,body{margin:0;min-height:100%;background:#151719;color:#f3ece2;font:16px Arial,sans-serif}#notice{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;flex-direction:column;gap:12px;text-align:center;padding:24px}#notice strong{font-size:20px}#notice p{max-width:38rem;line-height:1.6;color:#bbb}a{color:#d5b080}</style>
+<style>
+*{box-sizing:border-box}html,body{margin:0;width:100%;min-height:100%;background:#151719;color:#f3ece2;font:14px Arial,sans-serif}
+#viewer{position:fixed;inset:0;width:100%;height:100%;border:0;display:none}
+#notice{position:fixed;inset:0;display:grid;place-items:center;padding:24px;text-align:center}
+#card{width:min(420px,100%)}#card small{display:block;font-size:10px;color:#d5b080;letter-spacing:2px;font-weight:bold}h1{font-size:26px;margin:16px 0 8px}p{color:#aaa;line-height:1.7}
+.track{height:4px;border-radius:8px;background:#373a3e;margin-top:28px;overflow:hidden}.bar{width:0;height:100%;background:#d5b080;transition:width .25s}
+#progress{font-size:12px;color:#c5b9aa;min-height:16px}a{display:inline-block;color:#d5b080;text-decoration:underline;margin-top:14px;font-size:12px}
+</style>
 </head>
-<body><div id="notice"><strong>Opening interactive BIM portfolio…</strong><p>Loading the complete standalone project portfolio.</p></div>
+<body>
+<iframe id="viewer" title="Pranay Parkar — BIM Portfolio" sandbox="allow-scripts allow-downloads" allow="autoplay; fullscreen"></iframe>
+<div id="notice"><div id="card"><small>INTERACTIVE BIM PORTFOLIO</small><h1>Pranay Parkar</h1><p id="message">Loading the project gallery, models, drawings and visualizations…</p><div class="track"><div class="bar" id="bar"></div></div><p id="progress">Connecting…</p><a id="offline" href="#" style="display:none">Download portfolio HTML for offline viewing</a></div></div>
 <script>
-(async function(){
-  const source='https://d2ol7oe51mr4n9.cloudfront.net/user_3KrZhfUJuHSTWkAJncAOcYiLALt/69fdb414-445c-4c14-b469-18aaab8d60d6.html';
-  try{
-    const res=await fetch(source,{mode:'cors',cache:'default'});
-    if(!res.ok)throw new Error('HTTP '+res.status);
-    const html=await res.text();
-    if(!/^\s*<!doctype html/i.test(html)&&!/<html\b/i.test(html))throw new Error('Unexpected response');
-    document.open();document.write(html);document.close();
-  }catch(err){
-    const el=document.getElementById('notice');
-    if(el)el.innerHTML='<strong>Portfolio could not load.</strong><p>Please refresh the page or <a href="'+source+'">download the HTML file</a> and open it in your browser.</p>';
-    console.error(err);
-  }
+(async()=>{
+const source="https://d2ol7oe51mr4n9.cloudfront.net/user_3KrZhfUJuHSTWkAJncAOcYiLALt/69fdb414-445c-4c14-b469-18aaab8d60d6.html";
+const bar=document.getElementById('bar');
+const progress=document.getElementById('progress');
+const message=document.getElementById('message');
+const frame=document.getElementById('viewer');
+const offline=document.getElementById('offline');
+try{
+const response=await fetch(source,{mode:'cors',credentials:'omit',cache:'default'});
+if(!response.ok||!response.body)throw Error('HTTP '+response.status);
+const reader=response.body.getReader();const chunks=[];let received=0;
+const expected=Number(response.headers.get('content-length')||78922626);
+while(true){
+  const {done,value}=await reader.read();if(done)break;
+  chunks.push(value);received+=value.byteLength;
+  const percentage=Math.min(99,Math.round(100*received/expected));
+  bar.style.width=percentage+'%';
+  progress.textContent=percentage+'% · '+(received/1048576).toFixed(1)+' MB received';
+}
+const blob=new Blob(chunks,{type:'text/html'});
+const url=URL.createObjectURL(blob);
+offline.href=url;offline.download='Pranay-Parkar-Interactive-BIM-Portfolio.html';offline.style.display='inline-block';
+bar.style.width='100%';progress.textContent='Download complete · Preparing interactive views';
+message.textContent='Opening the complete BIM portfolio…';
+frame.onload=()=>{
+ frame.style.display='block';
+ document.getElementById('notice').style.display='none';
+};
+frame.src=url;
+}catch(err){
+ message.textContent='The online portfolio could not finish loading.';
+ progress.textContent='Please refresh or download the standalone HTML file.';
+ offline.style.display='inline-block';
+ offline.href=source;
+ offline.textContent='Open original portfolio file';
+ console.error(err);
+}
 })();
 </script>
 </body></html>
