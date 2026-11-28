@@ -19,7 +19,7 @@
 <div id="notice"><div id="card"><small>INTERACTIVE BIM PORTFOLIO</small><h1>Pranay Parkar</h1><p id="message">Loading the project gallery, models, drawings and visualizations…</p><div class="track"><div class="bar" id="bar"></div></div><p id="progress">Connecting…</p><a id="offline" href="#" style="display:none">Download portfolio HTML for offline viewing</a></div></div>
 <script>
 (async()=>{
-const source="https://d2ol7oe51mr4n9.cloudfront.net/user_3KrZhfUJuHSTWkAJncAOcYiLALt/0b727536-e145-4831-b1ed-081d29829b6d.html";
+const source="https://d2ol7oe51mr4n9.cloudfront.net/user_3KrZhfUJuHSTWkAJncAOcYiLALt/ba9d6262-24e4-4dd5-b036-cfad0b46001d.html";
 const bar=document.getElementById('bar');
 const progress=document.getElementById('progress');
 const message=document.getElementById('message');
@@ -29,7 +29,7 @@ try{
 const response=await fetch(source,{mode:'cors',credentials:'omit',cache:'default'});
 if(!response.ok||!response.body)throw Error('HTTP '+response.status);
 const reader=response.body.getReader();const chunks=[];let received=0;
-const expected=Number(response.headers.get('content-length')||79199799);
+const expected=Number(response.headers.get('content-length')||73439390);
 while(true){
   const {done,value}=await reader.read();if(done)break;
   chunks.push(value);received+=value.byteLength;
